@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:17
+    container_name: node-api-blog-db
+    restart: unless-stopped
+    ports:
+      - '6000:5432'
+    environment:
+      POSTGRES_USER: blog
+      POSTGRES_PASSWORD: blog
+      POSTGRES_DB: blog
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U blog -d blog']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  db-test:
+    image: postgres:17
+    container_name: node-api-blog-db-test
+    restart: unless-stopped
+    ports:
+      - '6001:5432'
+    environment:
+      POSTGRES_USER: blog
+      POSTGRES_PASSWORD: blog
+      POSTGRES_DB: blog_test
+    volumes:
+      - pgdata_test:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U blog -d blog_test']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  pgdata_test:
