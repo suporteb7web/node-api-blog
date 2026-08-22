@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import type { PostWithAuthorRow } from '../repositories/posts.repository.js';
+import { toListPostsResponseDto, toPostResponseDto } from '../dtos/posts/post-response.dto.js';
 import { DrizzlePostsRepository } from '../repositories/drizzle-posts.repository.js';
 import {
   createPostBodySchema,
@@ -7,82 +7,53 @@ import {
   postIdParamsSchema,
   updatePostBodySchema,
 } from '../schemas/posts.schemas.js';
-import { PostsService } from '../services/posts.service.js';
 import { validate } from '../utils/validate.js';
+import { CreatePostUseCase } from '../use-cases/posts/create-post.js';
+import { DeletePostUseCase } from '../use-cases/posts/delete-post.js';
+import { GetPostUseCase } from '../use-cases/posts/get-post.js';
+import { ListPostsUseCase } from '../use-cases/posts/list-posts.js';
+import { UpdatePostUseCase } from '../use-cases/posts/update-post.js';
 
-const postsService = new PostsService(new DrizzlePostsRepository());
+const postsRepository = new DrizzlePostsRepository();
 
-function toPostWithAuthorResponse(row: PostWithAuthorRow) {
-  return {
-    id: row.id,
-    title: row.title,
-    content: row.content,
-    createdAt: row.createdAt.toISOString(),
-    author: {
-      id: row.authorId,
-      name: row.authorName,
-    },
-  };
-}
+const listPosts = new ListPostsUseCase(postsRepository);
+const getPost = new GetPostUseCase(postsRepository);
+const createPost = new CreatePostUseCase(postsRepository);
+const updatePost = new UpdatePostUseCase(postsRepository);
+const deletePost = new DeletePostUseCase(postsRepository);
 
 export async function listPostsController(req: Request, res: Response): Promise<void> {
   const query = validate(listPostsQuerySchema, req.query);
-  const { rows, total, page, limit } = await postsService.listPosts(query.page);
+  const { rows, total, page, limit } = await listPosts.execute({ page: query.page });
 
-  res.status(200).json({
-    data: rows.map(toPostWithAuthorResponse),
-    meta: {
-      page,
-      limit,
-      total,
-      totalPages: Math.ceil(total / limit),
-    },
-  });
+  res.status(200).json(toListPostsResponseDto(rows, { page, limit, total }));
 }
 
 export async function getPostController(req: Request, res: Response): Promise<void> {
   const params = validate(postIdParamsSchema, req.params);
-  const post = await postsService.getPostById(params.id);
+  const post = await getPost.execute({ postId: params.id });
 
-  res.status(200).json(toPostWithAuthorResponse(post));
+  res.status(200).json(toPostResponseDto(post, { id: post.authorId, name: post.authorName }));
 }
 
 export async function createPostController(req: Request, res: Response): Promise<void> {
   const body = validate(createPostBodySchema, req.body);
-  const post = await postsService.createPost(req.user!, body);
+  const post = await createPost.execute({ author: req.user!, data: body });
 
-  res.status(201).json({
-    id: post.id,
-    title: post.title,
-    content: post.content,
-    createdAt: post.createdAt.toISOString(),
-    author: {
-      id: req.user?.id,
-      name: req.user?.name,
-    },
-  });
+  res.status(201).json(toPostResponseDto(post, req.user!));
 }
 
 export async function updatePostController(req: Request, res: Response): Promise<void> {
   const params = validate(postIdParamsSchema, req.params);
   const body = validate(updatePostBodySchema, req.body);
-  const post = await postsService.updatePost(req.user!, params.id, body);
+  const post = await updatePost.execute({ author: req.user!, postId: params.id, data: body });
 
-  res.status(200).json({
-    id: post.id,
-    title: post.title,
-    content: post.content,
-    createdAt: post.createdAt.toISOString(),
-    author: {
-      id: req.user?.id,
-      name: req.user?.name,
-    },
-  });
+  res.status(200).json(toPostResponseDto(post, req.user!));
 }
 
 export async function deletePostController(req: Request, res: Response): Promise<void> {
   const params = validate(postIdParamsSchema, req.params);
-  await postsService.deletePost(req.user!, params.id);
+  await deletePost.execute({ author: req.user!, postId: params.id });
 
   res.status(204).send();
 }
