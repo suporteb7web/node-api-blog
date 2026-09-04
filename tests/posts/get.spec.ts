@@ -51,6 +51,8 @@ describe('GET /api/posts/:id', () => {
       title: 'Public post',
       content: 'Public content',
       createdAt: post.createdAt,
+      likesCount: 0,
+      likedByMe: false,
       author: {
         id: user.id,
         name: 'Alice',
@@ -58,6 +60,70 @@ describe('GET /api/posts/:id', () => {
     });
     expect(response.body.author.email).toBeUndefined();
     expect(response.body.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  });
+
+  it('returns likesCount and likedByMe false without authentication', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    const post = await createPost(alice.token, 'Public post', 'Public content');
+
+    await request(app).post(`/api/posts/${post.id}/likes`).set('Authorization', `Bearer ${alice.token}`);
+    await request(app).post(`/api/posts/${post.id}/likes`).set('Authorization', `Bearer ${bob.token}`);
+
+    const response = await request(app).get(`/api/posts/${post.id}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.likesCount).toBe(2);
+    expect(response.body.likedByMe).toBe(false);
+  });
+
+  it('returns likedByMe true when the authenticated user liked the post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    const post = await createPost(alice.token);
+
+    await request(app).post(`/api/posts/${post.id}/likes`).set('Authorization', `Bearer ${bob.token}`);
+
+    const response = await request(app)
+      .get(`/api/posts/${post.id}`)
+      .set('Authorization', `Bearer ${bob.token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.likesCount).toBe(1);
+    expect(response.body.likedByMe).toBe(true);
+  });
+
+  it('returns likedByMe false when the authenticated user has not liked the post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    const post = await createPost(alice.token);
+
+    await request(app).post(`/api/posts/${post.id}/likes`).set('Authorization', `Bearer ${alice.token}`);
+
+    const response = await request(app)
+      .get(`/api/posts/${post.id}`)
+      .set('Authorization', `Bearer ${bob.token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.likesCount).toBe(1);
+    expect(response.body.likedByMe).toBe(false);
+  });
+
+  it('returns 401 UNAUTHORIZED when Authorization header is present but invalid', async () => {
+    const { token } = await registerUser('Alice', 'alice@example.com');
+    const post = await createPost(token);
+
+    const invalid = await request(app)
+      .get(`/api/posts/${post.id}`)
+      .set('Authorization', 'Bearer invalid-token');
+
+    const malformed = await request(app).get(`/api/posts/${post.id}`).set('Authorization', 'Token abc');
+
+    expect(invalid.status).toBe(401);
+    expect(invalid.body.error.code).toBe('UNAUTHORIZED');
+
+    expect(malformed.status).toBe(401);
+    expect(malformed.body.error.code).toBe('UNAUTHORIZED');
   });
 
   it('returns 404 NOT_FOUND when post does not exist', async () => {

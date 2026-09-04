@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
-import { toListPostsResponseDto, toPostResponseDto } from '../dtos/posts/post-response.dto.js';
+import { toListPostsResponseDto, toPostDetailDto, toPostResponseDto } from '../dtos/posts/post-response.dto.js';
+import { DrizzleLikesRepository } from '../repositories/drizzle-likes.repository.js';
 import { DrizzlePostsRepository } from '../repositories/drizzle-posts.repository.js';
 import {
   createPostBodySchema,
@@ -15,9 +16,10 @@ import { ListPostsUseCase } from '../use-cases/posts/list-posts.js';
 import { UpdatePostUseCase } from '../use-cases/posts/update-post.js';
 
 const postsRepository = new DrizzlePostsRepository();
+const likesRepository = new DrizzleLikesRepository();
 
-const listPosts = new ListPostsUseCase(postsRepository);
-const getPost = new GetPostUseCase(postsRepository);
+const listPosts = new ListPostsUseCase(postsRepository, likesRepository);
+const getPost = new GetPostUseCase(postsRepository, likesRepository);
 const createPost = new CreatePostUseCase(postsRepository);
 const updatePost = new UpdatePostUseCase(postsRepository);
 const deletePost = new DeletePostUseCase(postsRepository);
@@ -31,9 +33,9 @@ export async function listPostsController(req: Request, res: Response): Promise<
 
 export async function getPostController(req: Request, res: Response): Promise<void> {
   const params = validate(postIdParamsSchema, req.params);
-  const post = await getPost.execute({ postId: params.id });
+  const post = await getPost.execute({ postId: params.id, userId: req.user?.id });
 
-  res.status(200).json(toPostResponseDto(post, { id: post.authorId, name: post.authorName }));
+  res.status(200).json(toPostDetailDto(post, { id: post.authorId, name: post.authorName }));
 }
 
 export async function createPostController(req: Request, res: Response): Promise<void> {

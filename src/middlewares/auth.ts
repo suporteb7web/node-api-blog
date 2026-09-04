@@ -3,11 +3,10 @@ import type { NextFunction, Request, Response } from 'express';
 import { db } from '../db/index.js';
 import { users } from '../db/schema.js';
 import { AppError } from '../errors/app-error.js';
+import type { AuthUser } from '../types/auth.js';
 
-export async function requireAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
-  const header = req.headers.authorization;
-
-  if (!header || !header.startsWith('Bearer ')) {
+async function authenticateBearer(header: string): Promise<AuthUser> {
+  if (!header.startsWith('Bearer ')) {
     throw new AppError(401, 'UNAUTHORIZED', 'Unauthorized');
   }
 
@@ -30,6 +29,28 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
     throw new AppError(401, 'UNAUTHORIZED', 'Unauthorized');
   }
 
-  req.user = user;
+  return user;
+}
+
+export async function requireAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
+  const header = req.headers.authorization;
+
+  if (!header) {
+    throw new AppError(401, 'UNAUTHORIZED', 'Unauthorized');
+  }
+
+  req.user = await authenticateBearer(header);
+  next();
+}
+
+export async function optionalAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
+  const header = req.headers.authorization;
+
+  if (!header) {
+    next();
+    return;
+  }
+
+  req.user = await authenticateBearer(header);
   next();
 }

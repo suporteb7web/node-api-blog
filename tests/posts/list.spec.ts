@@ -77,6 +77,7 @@ describe('GET /api/posts', () => {
         title: 'Third',
         content: 'Content 3',
         createdAt: third.createdAt,
+        likesCount: 0,
         author: { id: alice.user.id, name: 'Alice' },
       },
       {
@@ -84,6 +85,7 @@ describe('GET /api/posts', () => {
         title: 'Second',
         content: 'Content 2',
         createdAt: second.createdAt,
+        likesCount: 0,
         author: { id: bob.user.id, name: 'Bob' },
       },
       {
@@ -91,6 +93,7 @@ describe('GET /api/posts', () => {
         title: 'First',
         content: 'Content 1',
         createdAt: first.createdAt,
+        likesCount: 0,
         author: { id: alice.user.id, name: 'Alice' },
       },
     ]);
@@ -156,6 +159,7 @@ describe('GET /api/posts', () => {
           title: 'Hello',
           content: 'World',
           createdAt: post.createdAt,
+          likesCount: 0,
           author: { id: user.id, name: 'Alice' },
         },
       ],
@@ -166,6 +170,42 @@ describe('GET /api/posts', () => {
         totalPages: 1,
       },
     });
+  });
+
+  it('includes likesCount per post and omits likedByMe', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    const carol = await registerUser('Carol', 'carol@example.com');
+
+    const popular = await createPost(alice.token, 'Popular', 'Many likes');
+    const lonely = await createPost(alice.token, 'Lonely', 'No likes');
+
+    await request(app).post(`/api/posts/${popular.id}/likes`).set('Authorization', `Bearer ${alice.token}`);
+    await request(app).post(`/api/posts/${popular.id}/likes`).set('Authorization', `Bearer ${bob.token}`);
+    await request(app).post(`/api/posts/${popular.id}/likes`).set('Authorization', `Bearer ${carol.token}`);
+
+    const response = await request(app).get('/api/posts');
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      {
+        id: lonely.id,
+        title: 'Lonely',
+        content: 'No likes',
+        createdAt: lonely.createdAt,
+        likesCount: 0,
+        author: { id: alice.user.id, name: 'Alice' },
+      },
+      {
+        id: popular.id,
+        title: 'Popular',
+        content: 'Many likes',
+        createdAt: popular.createdAt,
+        likesCount: 3,
+        author: { id: alice.user.id, name: 'Alice' },
+      },
+    ]);
+    expect(response.body.data.every((post: { likedByMe?: boolean }) => post.likedByMe === undefined)).toBe(true);
   });
 
   it('returns 400 VALIDATION_ERROR for invalid page', async () => {

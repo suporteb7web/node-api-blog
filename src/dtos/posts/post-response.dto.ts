@@ -26,8 +26,17 @@ export type PostResponseDto = {
   };
 };
 
+export type PostListItemDto = PostResponseDto & {
+  likesCount: number;
+};
+
+export type PostDetailDto = PostResponseDto & {
+  likesCount: number;
+  likedByMe: boolean;
+};
+
 export type ListPostsResponseDto = {
-  data: PostResponseDto[];
+  data: PostListItemDto[];
   meta: {
     page: number;
     limit: number;
@@ -46,12 +55,26 @@ export function toPostResponseDto(post: PostLike, author: AuthorLike): PostRespo
   };
 }
 
+export function toPostDetailDto(
+  post: PostLike & { likesCount: number; likedByMe: boolean },
+  author: AuthorLike,
+): PostDetailDto {
+  return {
+    ...toPostResponseDto(post, author),
+    likesCount: post.likesCount,
+    likedByMe: post.likedByMe,
+  };
+}
+
 export function toListPostsResponseDto(
-  rows: PostWithAuthorLike[],
+  rows: (PostWithAuthorLike & { likesCount: number })[],
   meta: { page: number; limit: number; total: number },
 ): ListPostsResponseDto {
   return {
-    data: rows.map((row) => toPostResponseDto(row, { id: row.authorId, name: row.authorName })),
+    data: rows.map((row) => ({
+      ...toPostResponseDto(row, { id: row.authorId, name: row.authorName }),
+      likesCount: row.likesCount,
+    })),
     meta: {
       page: meta.page,
       limit: meta.limit,
