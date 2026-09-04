@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { toListPostsResponseDto, toPostDetailDto, toPostResponseDto } from '../dtos/posts/post-response.dto.js';
 import { DrizzleLikesRepository } from '../repositories/drizzle-likes.repository.js';
 import { DrizzlePostsRepository } from '../repositories/drizzle-posts.repository.js';
+import { DrizzleRepliesRepository } from '../repositories/drizzle-replies.repository.js';
 import {
   createPostBodySchema,
   listPostsQuerySchema,
@@ -17,9 +18,10 @@ import { UpdatePostUseCase } from '../use-cases/posts/update-post.js';
 
 const postsRepository = new DrizzlePostsRepository();
 const likesRepository = new DrizzleLikesRepository();
+const repliesRepository = new DrizzleRepliesRepository();
 
 const listPosts = new ListPostsUseCase(postsRepository, likesRepository);
-const getPost = new GetPostUseCase(postsRepository, likesRepository);
+const getPost = new GetPostUseCase(postsRepository, likesRepository, repliesRepository);
 const createPost = new CreatePostUseCase(postsRepository);
 const updatePost = new UpdatePostUseCase(postsRepository);
 const deletePost = new DeletePostUseCase(postsRepository);

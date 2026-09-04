@@ -1,7 +1,7 @@
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { replies } from '../db/schema.js';
-import type { CreateReplyData, RepliesRepository, ReplyRecord } from './replies.repository.js';
+import { replies, users } from '../db/schema.js';
+import type { CreateReplyData, RepliesRepository, ReplyRecord, ReplyWithAuthorRow } from './replies.repository.js';
 
 export class DrizzleRepliesRepository implements RepliesRepository {
   async create(data: CreateReplyData): Promise<Omit<ReplyRecord, 'authorId' | 'postId'>> {
@@ -27,6 +27,21 @@ export class DrizzleRepliesRepository implements RepliesRepository {
     });
 
     return existing ?? null;
+  }
+
+  async listByPostId(postId: number): Promise<ReplyWithAuthorRow[]> {
+    return db
+      .select({
+        id: replies.id,
+        content: replies.content,
+        createdAt: replies.createdAt,
+        authorId: users.id,
+        authorName: users.name,
+      })
+      .from(replies)
+      .innerJoin(users, eq(replies.authorId, users.id))
+      .where(eq(replies.postId, postId))
+      .orderBy(asc(replies.createdAt));
   }
 
   async delete(replyId: number): Promise<void> {

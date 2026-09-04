@@ -1,9 +1,9 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import request from 'supertest';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app.js';
 import { db } from '../../src/db/index.js';
-import { posts } from '../../src/db/schema.js';
+import { likes, posts, replies } from '../../src/db/schema.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
 
 describe('DELETE /api/posts/:id', () => {
@@ -55,6 +55,34 @@ describe('DELETE /api/posts/:id', () => {
     });
 
     expect(stored).toBeUndefined();
+  });
+
+  it('cascade deletes likes and replies of the post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    const post = await createPost(alice.token);
+
+    await request(app).post(`/api/posts/${post.id}/likes`).set('Authorization', `Bearer ${bob.token}`);
+    const reply = await request(app)
+      .post(`/api/posts/${post.id}/replies`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({ content: 'Nice post' });
+
+    const response = await request(app)
+      .delete(`/api/posts/${post.id}`)
+      .set('Authorization', `Bearer ${alice.token}`);
+
+    expect(response.status).toBe(204);
+
+    const storedReply = await db.query.replies.findFirst({
+      where: eq(replies.id, reply.body.id),
+    });
+    const storedLike = await db.query.likes.findFirst({
+      where: and(eq(likes.userId, bob.user.id), eq(likes.postId, post.id)),
+    });
+
+    expect(storedReply).toBeUndefined();
+    expect(storedLike).toBeUndefined();
   });
 
   it('returns 400 VALIDATION_ERROR for invalid id', async () => {

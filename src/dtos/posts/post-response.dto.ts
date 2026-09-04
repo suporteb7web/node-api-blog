@@ -1,8 +1,18 @@
+import { toReplyResponseDto, type ReplyResponseDto } from '../replies/reply-response.dto.js';
+
 type PostLike = {
   id: number;
   title: string;
   content: string;
   createdAt: Date;
+};
+
+type ReplyWithAuthorLike = {
+  id: number;
+  content: string;
+  createdAt: Date;
+  authorId: number;
+  authorName: string;
 };
 
 type AuthorLike = {
@@ -33,6 +43,7 @@ export type PostListItemDto = PostResponseDto & {
 export type PostDetailDto = PostResponseDto & {
   likesCount: number;
   likedByMe: boolean;
+  replies: ReplyResponseDto[];
 };
 
 export type ListPostsResponseDto = {
@@ -56,13 +67,16 @@ export function toPostResponseDto(post: PostLike, author: AuthorLike): PostRespo
 }
 
 export function toPostDetailDto(
-  post: PostLike & { likesCount: number; likedByMe: boolean },
+  post: PostLike & { likesCount: number; likedByMe: boolean; replies: ReplyWithAuthorLike[] },
   author: AuthorLike,
 ): PostDetailDto {
   return {
     ...toPostResponseDto(post, author),
     likesCount: post.likesCount,
     likedByMe: post.likedByMe,
+    replies: post.replies.map((reply) =>
+      toReplyResponseDto(reply, { id: reply.authorId, name: reply.authorName }),
+    ),
   };
 }
 

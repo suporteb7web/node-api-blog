@@ -53,6 +53,7 @@ describe('GET /api/posts/:id', () => {
       createdAt: post.createdAt,
       likesCount: 0,
       likedByMe: false,
+      replies: [],
       author: {
         id: user.id,
         name: 'Alice',
@@ -60,6 +61,83 @@ describe('GET /api/posts/:id', () => {
     });
     expect(response.body.author.email).toBeUndefined();
     expect(response.body.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  });
+
+  it('returns all replies ordered by createdAt asc without pagination', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    const post = await createPost(alice.token);
+
+    const first = await request(app)
+      .post(`/api/posts/${post.id}/replies`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({ content: 'First reply' });
+
+    const second = await request(app)
+      .post(`/api/posts/${post.id}/replies`)
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ content: 'Second reply' });
+
+    const third = await request(app)
+      .post(`/api/posts/${post.id}/replies`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({ content: 'Third reply' });
+
+    const response = await request(app).get(`/api/posts/${post.id}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.replies).toEqual([
+      {
+        id: first.body.id,
+        content: 'First reply',
+        createdAt: first.body.createdAt,
+        author: { id: bob.user.id, name: 'Bob' },
+      },
+      {
+        id: second.body.id,
+        content: 'Second reply',
+        createdAt: second.body.createdAt,
+        author: { id: alice.user.id, name: 'Alice' },
+      },
+      {
+        id: third.body.id,
+        content: 'Third reply',
+        createdAt: third.body.createdAt,
+        author: { id: bob.user.id, name: 'Bob' },
+      },
+    ]);
+    expect(response.body.replies.every((reply: { author: { email?: string } }) => reply.author.email === undefined)).toBe(
+      true,
+    );
+  });
+
+  it('returns only replies that belong to the requested post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    const firstPost = await createPost(alice.token, 'First', 'Content 1');
+    const secondPost = await createPost(alice.token, 'Second', 'Content 2');
+
+    const ownReply = await request(app)
+      .post(`/api/posts/${firstPost.id}/replies`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({ content: 'On first post' });
+
+    await request(app)
+      .post(`/api/posts/${secondPost.id}/replies`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({ content: 'On second post' });
+
+    const response = await request(app).get(`/api/posts/${firstPost.id}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.replies).toEqual([
+      {
+        id: ownReply.body.id,
+        content: 'On first post',
+        createdAt: ownReply.body.createdAt,
+        author: { id: bob.user.id, name: 'Bob' },
+      },
+    ]);
   });
 
   it('returns likesCount and likedByMe false without authentication', async () => {

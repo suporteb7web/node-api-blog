@@ -206,6 +206,7 @@ describe('GET /api/posts', () => {
       },
     ]);
     expect(response.body.data.every((post: { likedByMe?: boolean }) => post.likedByMe === undefined)).toBe(true);
+    expect(response.body.data.every((post: { replies?: unknown }) => post.replies === undefined)).toBe(true);
   });
 
   it('returns 400 VALIDATION_ERROR for invalid page', async () => {
