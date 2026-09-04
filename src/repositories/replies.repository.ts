@@ -14,4 +14,6 @@ export type CreateReplyData = {
 
 export interface RepliesRepository {
   create(data: CreateReplyData): Promise<Omit<ReplyRecord, 'authorId' | 'postId'>>;
+  findById(replyId: number): Promise<ReplyRecord | null>;
+  delete(replyId: number): Promise<void>;
 }

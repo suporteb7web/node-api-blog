@@ -7,7 +7,7 @@ import {
   listPostsController,
   updatePostController,
 } from '../controllers/posts.controller.js';
-import { createReplyController } from '../controllers/replies.controller.js';
+import { createReplyController, deleteReplyController } from '../controllers/replies.controller.js';
 import { optionalAuth, requireAuth } from '../middlewares/auth.js';
 
 export const postsRouter = Router();
@@ -20,3 +20,4 @@ postsRouter.delete('/api/posts/:id', requireAuth, deletePostController);
 postsRouter.post('/api/posts/:id/likes', requireAuth, likePostController);
 postsRouter.delete('/api/posts/:id/likes', requireAuth, unlikePostController);
 postsRouter.post('/api/posts/:id/replies', requireAuth, createReplyController);
+postsRouter.delete('/api/posts/:id/replies/:replyId', requireAuth, deleteReplyController);
