@@ -5,12 +5,14 @@ import { createApp } from '../../src/app.js';
 import { db } from '../../src/db/index.js';
 import { replies } from '../../src/db/schema.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
+import { cleanMailpit, getMailpitMessage, listMailpitMessages } from '../helpers/mailpit.js';
 
 describe('POST /api/posts/:id/replies', () => {
   const app = createApp();
 
   beforeEach(async () => {
     await cleanDatabase();
+    await cleanMailpit();
   });
 
   afterAll(async () => {
@@ -89,6 +91,59 @@ describe('POST /api/posts/:id/replies', () => {
       name: 'Alice',
     });
     expect(response.body.content).toBe('Adding more context');
+
+    const messages = await listMailpitMessages();
+    expect(messages).toHaveLength(0);
+  });
+
+  it('emails the post author when someone else replies', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    const post = await createPost(alice.token);
+
+    const response = await request(app)
+      .post(`/api/posts/${post.id}/replies`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({
+        content: 'Nice post',
+      });
+
+    expect(response.status).toBe(201);
+
+    const messages = await listMailpitMessages();
+    expect(messages).toHaveLength(1);
+    expect(messages[0].To).toEqual([expect.objectContaining({ Address: 'alice@example.com' })]);
+    expect(messages[0].Subject).toContain('Post to reply');
+
+    const message = await getMailpitMessage(messages[0].ID);
+    expect(message.Text).toContain('Bob');
+    expect(message.Text).toContain('Nice post');
+    expect(message.Text).toContain(`#${post.id}`);
+    expect(message.Text).toContain('Post to reply');
+    expect(message.Text).not.toContain(alice.token);
+    expect(message.Text).not.toContain(bob.token);
+    expect(message.Text).not.toContain('secret1');
+  });
+
+  it('emails an excerpt when the reply content is long', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    const post = await createPost(alice.token);
+    const content = `${'A'.repeat(200)}UNIQUE_TAIL`;
+
+    const response = await request(app)
+      .post(`/api/posts/${post.id}/replies`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({ content });
+
+    expect(response.status).toBe(201);
+
+    const messages = await listMailpitMessages();
+    expect(messages).toHaveLength(1);
+
+    const message = await getMailpitMessage(messages[0].ID);
+    expect(message.Text).toContain(`${'A'.repeat(200)}...`);
+    expect(message.Text).not.toContain('UNIQUE_TAIL');
   });
 
   it('returns 400 VALIDATION_ERROR for invalid body', async () => {
