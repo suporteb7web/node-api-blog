@@ -15,6 +15,13 @@
       "when": 1788481904557,
       "tag": "0001_complete_risque",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789000136693,
+      "tag": "0002_pretty_harry_osborn",
+      "breakpoints": true
     }
   ]
 }

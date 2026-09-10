@@ -6,6 +6,7 @@ export const users = pgTable('users', {
   email: varchar('email', { length: 255 }).notNull().unique(),
   password: text('password').notNull(),
   token: text('token'),
+  avatarPath: text('avatar_path'),
 });
 
 export const posts = pgTable('posts', {
@@ -16,6 +17,7 @@ export const posts = pgTable('posts', {
   authorId: integer('author_id')
     .notNull()
     .references(() => users.id),
+  photoPath: text('photo_path'),
 });
 
 export const likes = pgTable(

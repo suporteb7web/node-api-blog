@@ -15,6 +15,12 @@ dist-ssr
 # Env
 .env
 
+# Uploads (keep folder structure, ignore generated files)
+uploads/**
+!uploads/**/
+!uploads/**/.gitkeep
+uploads-test/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
