@@ -1,7 +1,11 @@
-export type UserRecord = {
+export type UserPublic = {
   id: number;
   name: string;
   email: string;
+  avatarPath: string | null;
+};
+
+export type UserRecord = UserPublic & {
   password: string;
   token: string | null;
 };
@@ -13,14 +17,10 @@ export type CreateUserData = {
   token: string;
 };
 
-export type UserPublic = {
-  id: number;
-  name: string;
-  email: string;
-};
-
 export interface UsersRepository {
   findByEmail(email: string): Promise<UserRecord | null>;
+  findById(id: number): Promise<UserPublic | null>;
   create(data: CreateUserData): Promise<UserPublic>;
   updateToken(userId: number, token: string): Promise<void>;
+  updateAvatarPath(userId: number, avatarPath: string): Promise<void>;
 }

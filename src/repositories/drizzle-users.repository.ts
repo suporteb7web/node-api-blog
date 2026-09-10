@@ -8,10 +8,31 @@ import type {
   UsersRepository,
 } from './users.repository.js';
 
+const publicColumns = {
+  id: users.id,
+  name: users.name,
+  email: users.email,
+  avatarPath: users.avatarPath,
+} as const;
+
 export class DrizzleUsersRepository implements UsersRepository {
   async findByEmail(email: string): Promise<UserRecord | null> {
     const user = await db.query.users.findFirst({
       where: eq(users.email, email),
+    });
+
+    return user ?? null;
+  }
+
+  async findById(id: number): Promise<UserPublic | null> {
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, id),
+      columns: {
+        id: true,
+        name: true,
+        email: true,
+        avatarPath: true,
+      },
     });
 
     return user ?? null;
@@ -26,16 +47,16 @@ export class DrizzleUsersRepository implements UsersRepository {
         password: data.password,
         token: data.token,
       })
-      .returning({
-        id: users.id,
-        name: users.name,
-        email: users.email,
-      });
+      .returning(publicColumns);
 
     return user;
   }
 
   async updateToken(userId: number, token: string): Promise<void> {
     await db.update(users).set({ token }).where(eq(users.id, userId));
+  }
+
+  async updateAvatarPath(userId: number, avatarPath: string): Promise<void> {
+    await db.update(users).set({ avatarPath }).where(eq(users.id, userId));
   }
 }
