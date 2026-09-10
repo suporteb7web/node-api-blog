@@ -4,6 +4,7 @@ export type PostRecord = {
   content: string;
   createdAt: Date;
   authorId: number;
+  photoPath: string | null;
 };
 
 export type PostWithAuthorRow = {
@@ -13,6 +14,7 @@ export type PostWithAuthorRow = {
   createdAt: Date;
   authorId: number;
   authorName: string;
+  photoPath: string | null;
 };
 
 export type CreatePostData = {
@@ -37,5 +39,6 @@ export interface PostsRepository {
   create(data: CreatePostData): Promise<Omit<PostRecord, 'authorId'>>;
   findById(postId: number): Promise<PostRecord | null>;
   update(postId: number, data: UpdatePostData): Promise<Omit<PostRecord, 'authorId'>>;
+  updatePhotoPath(postId: number, photoPath: string): Promise<void>;
   delete(postId: number): Promise<void>;
 }

@@ -43,6 +43,7 @@ describe('POST /api/posts', () => {
       id: expect.any(Number),
       title: 'Hello World',
       content: 'First post content',
+      image: null,
       createdAt: expect.any(String),
       author: {
         id: user.id,

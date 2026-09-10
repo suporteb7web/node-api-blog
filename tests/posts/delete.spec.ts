@@ -1,3 +1,5 @@
+import { access } from 'node:fs/promises';
+import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import request from 'supertest';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -5,12 +7,15 @@ import { createApp } from '../../src/app.js';
 import { db } from '../../src/db/index.js';
 import { likes, posts, replies } from '../../src/db/schema.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
+import { createTestImage } from '../helpers/images.js';
+import { cleanUploads, getTestUploadsDir } from '../helpers/uploads.js';
 
 describe('DELETE /api/posts/:id', () => {
   const app = createApp();
 
   beforeEach(async () => {
     await cleanDatabase();
+    await cleanUploads();
   });
 
   afterAll(async () => {
@@ -55,6 +60,30 @@ describe('DELETE /api/posts/:id', () => {
     });
 
     expect(stored).toBeUndefined();
+  });
+
+  it('deletes the post image file from disk', async () => {
+    const { token } = await registerUser('Alice', 'alice@example.com');
+    const post = await createPost(token);
+
+    const upload = await request(app)
+      .put(`/api/posts/${post.id}/image`)
+      .set('Authorization', `Bearer ${token}`)
+      .attach('image', await createTestImage(), {
+        filename: 'photo.png',
+        contentType: 'image/png',
+      });
+
+    expect(upload.status).toBe(200);
+    const filePath = path.join(getTestUploadsDir(), 'posts', path.basename(upload.body.image as string));
+    await expect(access(filePath)).resolves.toBeUndefined();
+
+    const response = await request(app)
+      .delete(`/api/posts/${post.id}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(204);
+    await expect(access(filePath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('cascade deletes likes and replies of the post', async () => {

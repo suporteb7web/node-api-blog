@@ -1,3 +1,4 @@
+import { toPublicUploadPath } from '../media-path.js';
 import { toReplyResponseDto, type ReplyResponseDto } from '../replies/reply-response.dto.js';
 
 type PostLike = {
@@ -5,6 +6,7 @@ type PostLike = {
   title: string;
   content: string;
   createdAt: Date;
+  photoPath?: string | null;
 };
 
 type ReplyWithAuthorLike = {
@@ -29,6 +31,7 @@ export type PostResponseDto = {
   id: number;
   title: string;
   content: string;
+  image: string | null;
   createdAt: string;
   author: {
     id: number;
@@ -61,6 +64,7 @@ export function toPostResponseDto(post: PostLike, author: AuthorLike): PostRespo
     id: post.id,
     title: post.title,
     content: post.content,
+    image: toPublicUploadPath(post.photoPath),
     createdAt: post.createdAt.toISOString(),
     author: { id: author.id, name: author.name },
   };

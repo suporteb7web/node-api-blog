@@ -9,22 +9,26 @@ import {
   postIdParamsSchema,
   updatePostBodySchema,
 } from '../schemas/posts.schemas.js';
+import { SharpImageStorage } from '../storage/sharp-image-storage.js';
 import { validate } from '../utils/validate.js';
 import { CreatePostUseCase } from '../use-cases/posts/create-post.js';
 import { DeletePostUseCase } from '../use-cases/posts/delete-post.js';
 import { GetPostUseCase } from '../use-cases/posts/get-post.js';
 import { ListPostsUseCase } from '../use-cases/posts/list-posts.js';
+import { UpdatePostImageUseCase } from '../use-cases/posts/update-post-image.js';
 import { UpdatePostUseCase } from '../use-cases/posts/update-post.js';
 
 const postsRepository = new DrizzlePostsRepository();
 const likesRepository = new DrizzleLikesRepository();
 const repliesRepository = new DrizzleRepliesRepository();
+const imageStorage = new SharpImageStorage();
 
 const listPosts = new ListPostsUseCase(postsRepository, likesRepository);
 const getPost = new GetPostUseCase(postsRepository, likesRepository, repliesRepository);
 const createPost = new CreatePostUseCase(postsRepository);
 const updatePost = new UpdatePostUseCase(postsRepository);
-const deletePost = new DeletePostUseCase(postsRepository);
+const updatePostImage = new UpdatePostImageUseCase(postsRepository, imageStorage);
+const deletePost = new DeletePostUseCase(postsRepository, imageStorage);
 
 export async function listPostsController(req: Request, res: Response): Promise<void> {
   const query = validate(listPostsQuerySchema, req.query);
@@ -51,6 +55,17 @@ export async function updatePostController(req: Request, res: Response): Promise
   const params = validate(postIdParamsSchema, req.params);
   const body = validate(updatePostBodySchema, req.body);
   const post = await updatePost.execute({ author: req.user!, postId: params.id, data: body });
+
+  res.status(200).json(toPostResponseDto(post, req.user!));
+}
+
+export async function updatePostImageController(req: Request, res: Response): Promise<void> {
+  const params = validate(postIdParamsSchema, req.params);
+  const post = await updatePostImage.execute({
+    author: req.user!,
+    postId: params.id,
+    buffer: req.file?.buffer,
+  });
 
   res.status(200).json(toPostResponseDto(post, req.user!));
 }

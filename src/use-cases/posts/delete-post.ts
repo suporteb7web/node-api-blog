@@ -1,5 +1,6 @@
 import { AppError } from "../../errors/app-error.js";
 import { PostsRepository } from "../../repositories/posts.repository.js";
+import { ImageStorage } from "../../storage/image-storage.js";
 import { AuthUser } from "../../types/auth.js";
 
 type DeletePostInput = {
@@ -8,7 +9,10 @@ type DeletePostInput = {
 }
 
 export class DeletePostUseCase {
-    constructor(private readonly postsRepository: PostsRepository) { }
+    constructor(
+        private readonly postsRepository: PostsRepository,
+        private readonly imageStorage: ImageStorage,
+    ) { }
 
     async execute({ author, postId }: DeletePostInput) {
         const existing = await this.postsRepository.findById(postId);
@@ -19,5 +23,9 @@ export class DeletePostUseCase {
         }
 
         await this.postsRepository.delete(postId);
+
+        if (existing.photoPath) {
+            await this.imageStorage.delete(existing.photoPath);
+        }
     }
 }

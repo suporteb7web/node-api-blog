@@ -21,6 +21,7 @@ export class DrizzlePostsRepository implements PostsRepository {
           title: posts.title,
           content: posts.content,
           createdAt: posts.createdAt,
+          photoPath: posts.photoPath,
           authorId: users.id,
           authorName: users.name,
         })
@@ -42,6 +43,7 @@ export class DrizzlePostsRepository implements PostsRepository {
         title: posts.title,
         content: posts.content,
         createdAt: posts.createdAt,
+        photoPath: posts.photoPath,
         authorId: users.id,
         authorName: users.name,
       })
@@ -66,6 +68,7 @@ export class DrizzlePostsRepository implements PostsRepository {
         title: posts.title,
         content: posts.content,
         createdAt: posts.createdAt,
+        photoPath: posts.photoPath,
       });
 
     return post;
@@ -92,9 +95,14 @@ export class DrizzlePostsRepository implements PostsRepository {
         title: posts.title,
         content: posts.content,
         createdAt: posts.createdAt,
+        photoPath: posts.photoPath,
       });
 
     return post;
+  }
+
+  async updatePhotoPath(postId: number, photoPath: string): Promise<void> {
+    await db.update(posts).set({ photoPath }).where(eq(posts.id, postId));
   }
 
   async delete(postId: number): Promise<void> {
