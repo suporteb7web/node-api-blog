@@ -6,7 +6,7 @@ Documento de contrato derivado do [PRD](./project-prd.md). Define visão geral, 
 
 ## 1. Visão geral
 
-API de blog com autenticação de usuários, gestão de posts, likes e replies.
+API de blog com autenticação de usuários, gestão de posts, likes, replies, mídia e notificação por e-mail.
 
 - Cadastro e login geram um **token de sessão** persistido no banco e retornado ao cliente.
 - Rotas protegidas exigem `Authorization: Bearer <token>`.
@@ -14,14 +14,17 @@ API de blog com autenticação de usuários, gestão de posts, likes e replies.
 - Listagem e consulta individual de posts são **públicas**. A consulta por id aceita token **opcional** para preencher `likedByMe`.
 - Usuário autenticado pode curtir/descurtir um post (incluindo o próprio) e responder um post.
 - Só o **autor da reply** pode apagá-la (o autor do post não apaga reply de outra pessoa).
-- Escopo limitado a **auth + posts + likes + replies** (sem perfil, logout, papéis de admin, soft delete, threads, like em reply, etc.).
+- Usuário autenticado consulta os próprios dados em `GET /api/me` e atualiza o **avatar** em `PUT /api/me/avatar`.
+- O autor do post atualiza a **imagem** do post em `PUT /api/posts/:id/image` (arquivo em disco, path no banco).
+- Nova reply em um post **de outra pessoa** dispara e-mail ao autor do post. Responder o próprio post **não** gera e-mail.
+- Escopo limitado a **auth + posts + likes + replies + mídia + e-mail de reply** (sem perfil completo, logout, papéis de admin, soft delete, threads, like em reply, etc.).
 
 ### Relacionamentos
 
 | Recurso | Campos principais | Observações |
 |--------|-------------------|-------------|
-| `users` | `id`, `name`, `email`, `password` (hash), `token` (sessão) | `email` único |
-| `posts` | `id`, `title`, `content`, `createdAt`, `authorId` | Relação 1:N com `users` |
+| `users` | `id`, `name`, `email`, `password` (hash), `token` (sessão), `avatarPath` | `email` único; `avatarPath` é o path relativo do arquivo em disco (nullable) |
+| `posts` | `id`, `title`, `content`, `createdAt`, `authorId`, `photoPath` | Relação 1:N com `users`; `photoPath` é o path relativo do arquivo em disco (nullable) |
 | `likes` | `userId`, `postId` | Um like por par usuário+post; o autor do post **pode** curtir o próprio post |
 | `replies` | `id`, `content`, `createdAt`, `authorId`, `postId` | Relação 1:N com `posts` e com `users`; sem thread (reply só no post) |
 
@@ -35,12 +38,15 @@ Um usuário pode ter vários posts; cada post pertence a um único usuário. Um 
 |--------|------------|
 | Linguagem / bundling | TypeScript com Vite (template vanilla-ts) |
 | HTTP | Express |
+| Upload (borda) | Multer (`memoryStorage`) — só na rota |
+| Imagem | Sharp (processar e gravar em disco) |
+| E-mail | Nodemailer; Mailpit (SMTP + UI) em dev/teste |
 | Validação de input | Zod |
 | ORM | Drizzle |
 | Banco | PostgreSQL 17 |
 | Hash de senha | bcrypt |
 | Testes | Vitest |
-| Infra local | Docker Compose (app DB + test DB, volumes separados) |
+| Infra local | Docker Compose (app DB + test DB, volumes separados; Mailpit) |
 
 ---
 
@@ -66,6 +72,7 @@ Regras:
 - Services não conhecem detalhes de Express (`req`/`res`).
 - Inputs inválidos retornam **400** com detalhes de validação (falha no Zod), sem chamar o service.
 - Autenticação/autorização é resolvida antes ou no limiar do controller/service conforme o endpoint; falhas de auth retornam **401** / **403** conforme a seção de erros.
+- Upload: Multer só na rota; o service recebe o buffer da imagem. Persistência no banco é só o path. E-mail de reply é efeito colateral do service de criar reply, depois de persistir.
 
 ---
 
@@ -121,7 +128,7 @@ Todas as respostas de erro usam o mesmo envelope:
 |------|--------|--------|
 | 400 | `VALIDATION_ERROR` | Body/params/query inválidos (Zod) |
 | 401 | `UNAUTHORIZED` | Token ausente, inválido ou credenciais incorretas no login |
-| 403 | `FORBIDDEN` | Autenticado, mas sem permissão (ex.: editar/excluir post de outro autor; apagar reply de outro autor) |
+| 403 | `FORBIDDEN` | Autenticado, mas sem permissão (ex.: editar/excluir post de outro autor; atualizar imagem de post de outro autor; apagar reply de outro autor) |
 | 404 | `NOT_FOUND` | Recurso não encontrado |
 | 409 | `CONFLICT` | Violação de unicidade (ex.: e-mail já cadastrado) |
 | 500 | `INTERNAL_ERROR` | Erro inesperado |
@@ -148,13 +155,36 @@ Todas as respostas de erro usam o mesmo envelope:
 
 ### 4.9 Shape de post nas respostas
 
-`likesCount` e `replies` **não** entram em `POST /api/posts` nem em `PUT /api/posts/:id`.
+`likesCount` e `replies` **não** entram em `POST /api/posts`, `PUT /api/posts/:id` nem em `PUT /api/posts/:id/image`.
 
 | Endpoint | `likesCount` | `likedByMe` | `replies` |
 |----------|--------------|-------------|-----------|
 | `GET /api/posts` | sim | não | não |
 | `GET /api/posts/:id` | sim | sim | sim (array completo, sem paginação, `createdAt` asc) |
-| `POST /api/posts` / `PUT /api/posts/:id` | não | não | não |
+| `POST /api/posts` / `PUT /api/posts/:id` / `PUT /api/posts/:id/image` | não | não | não |
+
+`image` (path público da foto do post, ou `null`) entra em **todas** as respostas de post acima. `PUT /api/posts/:id` não altera a imagem — só título e/ou conteúdo.
+
+### 4.10 Upload de imagem
+
+Rotas de arquivo usam `multipart/form-data`. O restante da API continua `application/json`.
+
+| Endpoint | Campo do arquivo | Obrigatório |
+|----------|------------------|-------------|
+| `PUT /api/posts/:id/image` | `image` | Sim |
+| `PUT /api/me/avatar` | `image` | Sim |
+
+- Tipos aceitos: `image/jpeg`, `image/png`, `image/webp`.
+- Arquivo ausente, tipo não permitido ou imagem inválida (não decodificável) → **400** `VALIDATION_ERROR`.
+- O arquivo é processado e gravado em disco; o banco guarda só o **path relativo**. A resposta expõe o path público (ex.: `/uploads/posts/...`, `/uploads/avatars/...`), nunca o binário.
+- Substituir a imagem apaga o arquivo anterior no disco depois de persistir o path novo.
+
+### 4.11 E-mail de reply
+
+- Após persistir uma reply em `POST /api/posts/:id/replies`, se o autor da reply **não** for o autor do post, o sistema envia e-mail ao **autor do post**.
+- Responder o próprio post **não** dispara e-mail.
+- O corpo inclui o autor da reply, um trecho do conteúdo e a identificação do post. Não inclui senha nem token.
+- Falha de SMTP **não** desfaz a reply já gravada: a request ainda retorna **201**.
 
 ---
 
@@ -166,14 +196,17 @@ Todas as respostas de erro usam o mesmo envelope:
 |--------|------|------|-----------|
 | `POST` | `/api/auth/register` | Não | Cadastro + retorno de token |
 | `POST` | `/api/auth/login` | Não | Login + retorno de token |
+| `GET` | `/api/me` | Sim | Dados do usuário autenticado |
+| `PUT` | `/api/me/avatar` | Sim | Atualizar o avatar do usuário autenticado |
 | `GET` | `/api/posts` | Não | Listagem pública paginada |
 | `GET` | `/api/posts/:id` | Opcional | Consulta pública por id (`likedByMe` se autenticado) |
 | `POST` | `/api/posts` | Sim | Criar post |
 | `PUT` | `/api/posts/:id` | Sim | Atualizar parcialmente o próprio post |
+| `PUT` | `/api/posts/:id/image` | Sim | Atualizar a imagem do próprio post |
 | `DELETE` | `/api/posts/:id` | Sim | Excluir (hard delete) o próprio post |
 | `POST` | `/api/posts/:id/likes` | Sim | Curtir post (idempotente) |
 | `DELETE` | `/api/posts/:id/likes` | Sim | Descurtir post (idempotente) |
-| `POST` | `/api/posts/:id/replies` | Sim | Responder um post |
+| `POST` | `/api/posts/:id/replies` | Sim | Responder um post (e-mail ao autor, se não for auto-reply) |
 | `DELETE` | `/api/posts/:id/replies/:replyId` | Sim | Excluir a própria reply |
 
 ---
@@ -205,10 +238,13 @@ Cadastra um usuário. Em sucesso, gera e persiste token de sessão e o retorna (
   "user": {
     "id": 1,
     "name": "string",
-    "email": "string"
+    "email": "string",
+    "avatar": null
   }
 }
 ```
+
+`avatar` é o path público do arquivo (ex.: `"/uploads/avatars/..."`) ou `null` quando o usuário ainda não enviou avatar.
 
 **400** — `VALIDATION_ERROR` (campos inválidos)
 
@@ -251,7 +287,8 @@ Autentica com e-mail e senha. Em sucesso, gera e persiste novo token de sessão 
   "user": {
     "id": 1,
     "name": "string",
-    "email": "string"
+    "email": "string",
+    "avatar": null
   }
 }
 ```
@@ -271,9 +308,74 @@ Autentica com e-mail e senha. Em sucesso, gera e persiste novo token de sessão 
 
 ---
 
-### 5.3 `GET /api/posts`
+### 5.3 `GET /api/me`
 
-Listagem pública de posts em ordem cronológica inversa (`createdAt` desc). Inclui o nome do autor (não o e-mail) e `likesCount`. **Não** inclui `likedByMe` nem o array `replies`.
+Retorna os dados do usuário autenticado. Não inclui senha, hash nem token.
+
+| | |
+|--|--|
+| **Authorization** | Sim — `Bearer <token>` |
+
+#### Input
+
+Nenhum (`body`, `params` e `query` vazios).
+
+#### Respostas
+
+**200 OK**
+
+```json
+{
+  "id": 1,
+  "name": "string",
+  "email": "string",
+  "avatar": null
+}
+```
+
+- `avatar` é o path público (ex.: `"/uploads/avatars/..."`) ou `null` quando o usuário ainda não enviou avatar.
+
+**401** — `UNAUTHORIZED` — token ausente/inválido
+
+---
+
+### 5.4 `PUT /api/me/avatar`
+
+Atualiza o avatar do usuário autenticado. O campo de arquivo é `image`. Substitui o avatar anterior, se houver.
+
+| | |
+|--|--|
+| **Authorization** | Sim — `Bearer <token>` |
+| **Content-Type** | `multipart/form-data` |
+
+#### Input — arquivo
+
+| Campo | Tipo | Obrigatório | Regras |
+|-------|------|-------------|--------|
+| `image` | arquivo | Sim | Imagem válida; MIME `image/jpeg`, `image/png` ou `image/webp` |
+
+#### Respostas
+
+**200 OK**
+
+```json
+{
+  "id": 1,
+  "name": "string",
+  "email": "string",
+  "avatar": "/uploads/avatars/..."
+}
+```
+
+**400** — `VALIDATION_ERROR` — arquivo ausente, tipo não permitido ou imagem inválida
+
+**401** — `UNAUTHORIZED`
+
+---
+
+### 5.5 `GET /api/posts`
+
+Listagem pública de posts em ordem cronológica inversa (`createdAt` desc). Inclui o nome do autor (não o e-mail), `likesCount` e `image`. **Não** inclui `likedByMe` nem o array `replies`.
 
 | | |
 |--|--|
@@ -296,6 +398,7 @@ Listagem pública de posts em ordem cronológica inversa (`createdAt` desc). Inc
       "id": 1,
       "title": "string",
       "content": "string",
+      "image": null,
       "createdAt": "2026-08-07T21:00:00.000Z",
       "likesCount": 0,
       "author": {
@@ -315,12 +418,13 @@ Listagem pública de posts em ordem cronológica inversa (`createdAt` desc). Inc
 
 - Página sem resultados retorna `data: []` com `meta` coerente (não é 404).
 - `likesCount` é `0` quando o post não tem likes.
+- `image` é o path público da foto (ex.: `"/uploads/posts/..."`) ou `null` quando o post não tem imagem.
 
 **400** — `VALIDATION_ERROR` — `page` inválida (ex.: `0`, negativo, não numérico)
 
 ---
 
-### 5.4 `GET /api/posts/:id`
+### 5.6 `GET /api/posts/:id`
 
 Consulta pública de um post por id, com nome do autor, `likesCount`, `likedByMe` e o array completo de `replies` (sem paginação), ordenado por `createdAt` **asc**.
 
@@ -345,6 +449,7 @@ Se o header `Authorization` estiver presente, deve ser um Bearer válido; caso c
   "id": 1,
   "title": "string",
   "content": "string",
+  "image": null,
   "createdAt": "2026-08-07T21:00:00.000Z",
   "likesCount": 0,
   "likedByMe": false,
@@ -369,6 +474,7 @@ Se o header `Authorization` estiver presente, deve ser um Bearer válido; caso c
 - `likesCount` é `0` quando o post não tem likes.
 - `likedByMe` é `true` somente se o token for válido **e** aquele usuário já tiver curtido o post; caso contrário `false`.
 - `replies` é `[]` quando o post não tem respostas. Sem paginação: todas as replies do post. Sem e-mail do autor da reply.
+- `image` é o path público da foto ou `null`.
 
 **400** — `VALIDATION_ERROR` — `id` inválido
 
@@ -387,7 +493,7 @@ Se o header `Authorization` estiver presente, deve ser um Bearer válido; caso c
 
 ---
 
-### 5.5 `POST /api/posts`
+### 5.7 `POST /api/posts`
 
 Cria um post para o usuário autenticado. `createdAt` é definido no momento da criação. `authorId` vem do usuário do token.
 
@@ -412,6 +518,7 @@ Cria um post para o usuário autenticado. `createdAt` é definido no momento da 
   "id": 1,
   "title": "string",
   "content": "string",
+  "image": null,
   "createdAt": "2026-08-07T21:00:00.000Z",
   "author": {
     "id": 1,
@@ -426,9 +533,9 @@ Cria um post para o usuário autenticado. `createdAt` é definido no momento da 
 
 ---
 
-### 5.6 `PUT /api/posts/:id`
+### 5.8 `PUT /api/posts/:id`
 
-Atualização **parcial** do próprio post. Pode enviar só `title`, só `content`, ou ambos. Pelo menos um campo deve estar presente.
+Atualização **parcial** do próprio post. Pode enviar só `title`, só `content`, ou ambos. Pelo menos um campo deve estar presente. Não altera a imagem do post (use `PUT /api/posts/:id/image`).
 
 | | |
 |--|--|
@@ -459,6 +566,7 @@ Atualização **parcial** do próprio post. Pode enviar só `title`, só `conten
   "id": 1,
   "title": "string",
   "content": "string",
+  "image": null,
   "createdAt": "2026-08-07T21:00:00.000Z",
   "author": {
     "id": 1,
@@ -486,9 +594,69 @@ Atualização **parcial** do próprio post. Pode enviar só `title`, só `conten
 
 ---
 
-### 5.7 `DELETE /api/posts/:id`
+### 5.9 `PUT /api/posts/:id/image`
 
-Hard delete do próprio post. Likes e replies daquele post são removidos em **cascade**.
+Atualiza a imagem do **próprio** post. O arquivo é obrigatório e deve ser uma imagem válida. Substitui a imagem anterior, se houver. Não altera `title` nem `content`.
+
+Confirmar que o post existe antes de checar ownership: post inexistente → **404**; post existe, mas não pertence ao usuário autenticado → **403**.
+
+| | |
+|--|--|
+| **Authorization** | Sim — `Bearer <token>` |
+| **Content-Type** | `multipart/form-data` |
+
+#### Input — `params`
+
+| Campo | Tipo | Obrigatório | Regras (Zod) |
+|-------|------|-------------|--------------|
+| `id` | `number` (coerce) | Sim | Inteiro positivo |
+
+#### Input — arquivo
+
+| Campo | Tipo | Obrigatório | Regras |
+|-------|------|-------------|--------|
+| `image` | arquivo | Sim | Imagem válida; MIME `image/jpeg`, `image/png` ou `image/webp` |
+
+#### Respostas
+
+**200 OK**
+
+```json
+{
+  "id": 1,
+  "title": "string",
+  "content": "string",
+  "image": "/uploads/posts/...",
+  "createdAt": "2026-08-07T21:00:00.000Z",
+  "author": {
+    "id": 1,
+    "name": "string"
+  }
+}
+```
+
+**400** — `VALIDATION_ERROR` — `id` inválido, arquivo ausente, tipo não permitido ou imagem inválida
+
+**401** — `UNAUTHORIZED`
+
+**403** — `FORBIDDEN` — post existe, mas não pertence ao usuário autenticado
+
+```json
+{
+  "error": {
+    "code": "FORBIDDEN",
+    "message": "You can only update your own posts"
+  }
+}
+```
+
+**404** — `NOT_FOUND` — post inexistente
+
+---
+
+### 5.10 `DELETE /api/posts/:id`
+
+Hard delete do próprio post. Likes e replies daquele post são removidos em **cascade**. O arquivo da imagem do post, se existir, é removido do disco.
 
 | | |
 |--|--|
@@ -527,7 +695,7 @@ Nenhum.
 
 ---
 
-### 5.8 `POST /api/posts/:id/likes`
+### 5.11 `POST /api/posts/:id/likes`
 
 Curte o post. **Idempotente**: se o usuário já curtiu, o estado não muda e a resposta é a mesma. O autor do post **pode** curtir o próprio post. Sem body.
 
@@ -566,7 +734,7 @@ Nenhum.
 
 ---
 
-### 5.9 `DELETE /api/posts/:id/likes`
+### 5.12 `DELETE /api/posts/:id/likes`
 
 Remove o like do usuário autenticado naquele post. **Idempotente**: se o usuário não tinha curtido, o estado não muda e a resposta é a mesma. Sem body.
 
@@ -596,9 +764,11 @@ Nenhum.
 
 ---
 
-### 5.10 `POST /api/posts/:id/replies`
+### 5.13 `POST /api/posts/:id/replies`
 
 Cria uma reply no post. `createdAt` é definido no momento da criação. `authorId` vem do usuário do token. Não há thread: reply só existe no post, nunca em outra reply.
+
+Depois de persistir a reply, se o autor da reply **não** for o autor do post, o sistema envia e-mail ao autor do post (autor da reply, trecho do conteúdo e identificação do post). Responder o próprio post **não** gera e-mail. Falha de SMTP não desfaz a reply: a resposta continua **201**.
 
 | | |
 |--|--|
@@ -643,7 +813,7 @@ Campos extras devem ser rejeitados (schema estrito / `.strict()`).
 
 ---
 
-### 5.11 `DELETE /api/posts/:id/replies/:replyId`
+### 5.14 `DELETE /api/posts/:id/replies/:replyId`
 
 Hard delete da **própria** reply. O autor do post **não** pode apagar reply de outra pessoa. Sem body.
 
@@ -693,10 +863,13 @@ Nenhum.
 |----------|-----|-----|-----|-----|-----|
 | `POST /api/auth/register` | ✓ | | | | ✓ |
 | `POST /api/auth/login` | ✓ | ✓ | | | |
+| `GET /api/me` | | ✓ | | | |
+| `PUT /api/me/avatar` | ✓ | ✓ | | | |
 | `GET /api/posts` | ✓ | | | | |
 | `GET /api/posts/:id` | ✓ | ✓ | | ✓ | |
 | `POST /api/posts` | ✓ | ✓ | | | |
 | `PUT /api/posts/:id` | ✓ | ✓ | ✓ | ✓ | |
+| `PUT /api/posts/:id/image` | ✓ | ✓ | ✓ | ✓ | |
 | `DELETE /api/posts/:id` | ✓ | ✓ | ✓ | ✓ | |
 | `POST /api/posts/:id/likes` | ✓ | ✓ | | ✓ | |
 | `DELETE /api/posts/:id/likes` | ✓ | ✓ | | ✓ | |
@@ -709,12 +882,14 @@ Erros **500** (`INTERNAL_ERROR`) podem ocorrer em qualquer endpoint diante de fa
 
 ## 7. Fora deste contrato
 
-- Perfil do usuário (consultar/editar dados, trocar senha).
+- Perfil completo (editar `name`/`email`, trocar senha). `GET /api/me` e avatar estão no contrato.
 - Logout / invalidação explícita de sessão.
 - Papéis e permissões além de autenticado vs público.
 - Soft delete, status de publicação, slug, rascunhos.
-- Upload de mídia, tags.
+- Tags.
 - Thread de replies (reply em reply).
 - Like em reply.
 - Paginação de replies.
 - Edição de reply.
+- Remover imagem do post ou avatar sem substituir.
+- Provedor de e-mail externo (SES/SendGrid); armazenamento de imagem em S3/blob no banco.
