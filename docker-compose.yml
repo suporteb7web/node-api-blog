@@ -50,6 +50,35 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7
+    container_name: node-api-blog-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  bullboard:
+    image: ghcr.io/felixmosh/bull-board:9
+    container_name: node-api-blog-bullboard
+    restart: unless-stopped
+    command: --redis redis://redis:6379
+    environment:
+      BULL_BOARD_USER: blog
+      BULL_BOARD_PASSWORD: blog
+    ports:
+      - '127.0.0.1:3001:3000'
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   pgdata:
   pgdata_test:
+  redisdata:

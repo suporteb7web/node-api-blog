@@ -1,12 +1,10 @@
 import { AppError } from '../../errors/app-error.js';
-import type { Mailer } from '../../mailer/mailer.js';
 import type { PostsRepository } from '../../repositories/posts.repository.js';
 import type { RepliesRepository } from '../../repositories/replies.repository.js';
+import type { ReplyNotificationJobsRepository } from '../../repositories/reply-notification-jobs.repository.js';
 import type { UsersRepository } from '../../repositories/users.repository.js';
 import type { CreateReplyBody } from '../../schemas/replies.schemas.js';
 import type { AuthUser } from '../../types/auth.js';
-
-const EXCERPT_MAX_LENGTH = 200;
 
 type CreateReplyInput = {
   author: AuthUser;
@@ -19,7 +17,7 @@ export class CreateReplyUseCase {
     private readonly postsRepository: PostsRepository,
     private readonly repliesRepository: RepliesRepository,
     private readonly usersRepository: UsersRepository,
-    private readonly mailer: Mailer,
+    private readonly jobsRepository: ReplyNotificationJobsRepository,
   ) {}
 
   async execute({ author, postId, data }: CreateReplyInput) {
@@ -33,7 +31,7 @@ export class CreateReplyUseCase {
     });
 
     if (author.id !== existing.authorId) {
-      await this.notifyPostAuthor({
+      await this.enqueueNotification({
         postId: existing.id,
         postTitle: existing.title,
         postAuthorId: existing.authorId,
@@ -45,7 +43,7 @@ export class CreateReplyUseCase {
     return reply;
   }
 
-  private async notifyPostAuthor(input: {
+  private async enqueueNotification(input: {
     postId: number;
     postTitle: string;
     postAuthorId: number;
@@ -56,25 +54,15 @@ export class CreateReplyUseCase {
       const postAuthor = await this.usersRepository.findById(input.postAuthorId);
       if (!postAuthor) return;
 
-      await this.mailer.send({
+      await this.jobsRepository.enqueue({
         to: postAuthor.email,
-        subject: `New reply on "${input.postTitle}"`,
-        text: [
-          `${input.replyAuthorName} replied to your post "${input.postTitle}" (#${input.postId}):`,
-          '',
-          excerpt(input.replyContent),
-        ].join('\n'),
+        postId: input.postId,
+        postTitle: input.postTitle,
+        replyAuthorName: input.replyAuthorName,
+        replyContent: input.replyContent,
       });
     } catch (error) {
-      console.error('Failed to send reply notification email', error);
+      console.error('Failed to enqueue reply notification email', error);
     }
   }
-}
-
-function excerpt(content: string): string {
-  if (content.length <= EXCERPT_MAX_LENGTH) {
-    return content;
-  }
-
-  return `${content.slice(0, EXCERPT_MAX_LENGTH)}...`;
 }

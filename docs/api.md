@@ -46,7 +46,7 @@ Um usuário pode ter vários posts; cada post pertence a um único usuário. Um 
 | Banco | PostgreSQL 17 |
 | Hash de senha | bcrypt |
 | Testes | Vitest |
-| Infra local | Docker Compose (app DB + test DB, volumes separados; Mailpit) |
+| Infra local | Docker Compose (app DB + test DB, volumes separados; Redis; Mailpit) |
 
 ---
 
@@ -72,7 +72,7 @@ Regras:
 - Services não conhecem detalhes de Express (`req`/`res`).
 - Inputs inválidos retornam **400** com detalhes de validação (falha no Zod), sem chamar o service.
 - Autenticação/autorização é resolvida antes ou no limiar do controller/service conforme o endpoint; falhas de auth retornam **401** / **403** conforme a seção de erros.
-- Upload: Multer só na rota; o service recebe o buffer da imagem. Persistência no banco é só o path. E-mail de reply é efeito colateral do service de criar reply, depois de persistir.
+- Upload: Multer só na rota; o service recebe o buffer da imagem. Persistência no banco é só o path. E-mail de reply é efeito colateral do service de criar reply: depois de persistir, enfileira um job; o worker envia.
 
 ---
 
@@ -181,10 +181,10 @@ Rotas de arquivo usam `multipart/form-data`. O restante da API continua `applica
 
 ### 4.11 E-mail de reply
 
-- Após persistir uma reply em `POST /api/posts/:id/replies`, se o autor da reply **não** for o autor do post, o sistema envia e-mail ao **autor do post**.
+- Após persistir uma reply em `POST /api/posts/:id/replies`, se o autor da reply **não** for o autor do post, o sistema **enfileira** o envio de e-mail ao **autor do post**.
 - Responder o próprio post **não** dispara e-mail.
-- O corpo inclui o autor da reply, um trecho do conteúdo e a identificação do post. Não inclui senha nem token.
-- Falha de SMTP **não** desfaz a reply já gravada: a request ainda retorna **201**.
+- O job carrega os dados prontos (destinatário, título/id do post, autor e conteúdo da reply). O worker monta o corpo (trecho do conteúdo e identificação do post) e envia. Não inclui senha nem token.
+- Falha ao enfileirar ou de SMTP **não** desfaz a reply já gravada: a request ainda retorna **201**.
 
 ---
 
@@ -768,7 +768,7 @@ Nenhum.
 
 Cria uma reply no post. `createdAt` é definido no momento da criação. `authorId` vem do usuário do token. Não há thread: reply só existe no post, nunca em outra reply.
 
-Depois de persistir a reply, se o autor da reply **não** for o autor do post, o sistema envia e-mail ao autor do post (autor da reply, trecho do conteúdo e identificação do post). Responder o próprio post **não** gera e-mail. Falha de SMTP não desfaz a reply: a resposta continua **201**.
+Depois de persistir a reply, se o autor da reply **não** for o autor do post, o sistema enfileira o envio de e-mail ao autor do post (autor da reply, trecho do conteúdo e identificação do post). Responder o próprio post **não** gera e-mail. Falha ao enfileirar ou de SMTP não desfaz a reply: a resposta continua **201**.
 
 | | |
 |--|--|

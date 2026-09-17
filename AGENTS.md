@@ -23,6 +23,7 @@ Antes de mudar comportamento HTTP, conferir `docs/api.md`. Não inventar endpoin
 | Upload (borda) | Multer (`memoryStorage`) — **só na rota/middleware** |
 | Imagem | Sharp (processar + gravar em disco) |
 | E-mail | Nodemailer; Mailpit (SMTP + UI) em dev/teste |
+| Fila | BullMQ + Redis |
 | Validação | Zod 4 |
 | ORM / banco | Drizzle ORM + PostgreSQL 17 |
 | Senha | bcrypt (cost 10) |
@@ -36,7 +37,7 @@ Imports TypeScript usam extensão `.js` (NodeNext): `import { x } from './foo.js
 
 ```bash
 cp .env.example .env   # se ainda não existir
-npm run db:up          # Postgres app :6000, teste :6001, Mailpit SMTP :1025 / UI :8025
+npm run db:up          # Postgres app :6000, teste :6001, Redis :6379, Mailpit SMTP :1025 / UI :8025
 npm run db:migrate
 npm run dev            # http://localhost:3000
 npm test               # NODE_ENV=test vitest run
@@ -44,7 +45,7 @@ npm test               # NODE_ENV=test vitest run
 
 Outros: `db:generate` (drizzle-kit), `db:studio`, `db:down`, `build`, `start`.
 
-Testes precisam dos containers `db-test` e **Mailpit** no ar. `fileParallelism: false` no Vitest — os specs compartilham o mesmo banco.
+Testes precisam dos containers `db-test`, **Redis** e **Mailpit** no ar. `fileParallelism: false` no Vitest — os specs compartilham o mesmo banco.
 
 ## Mapa de pastas
 
@@ -57,9 +58,10 @@ src/
   routes/                # paths HTTP + requireAuth + Multer (só aqui)
   controllers/           # HTTP: validar → use case → DTO → status/json
   use-cases/             # regras de negócio (sem req/res); recebem Buffer, não File do Multer
-  repositories/          # interface + implementação Drizzle (path da imagem, não o arquivo)
+  repositories/          # interface + impl (Drizzle para dados; BullMQ para jobs)
+  queues/                # Queue + processor + worker (BullMQ); worker sobe em server.ts
   storage/               # Sharp: processar buffer e salvar em disco; devolver path relativo
-  mailer/                # interface + Nodemailer; Mailpit só via SMTP_HOST/PORT
+  mailer/                # interface + Nodemailer; usado pelo processor da fila
   schemas/               # Zod (body/params/query)
   dtos/                  # mapeamento de resposta
   middlewares/           # requireAuth, errorHandler; Multer se for middleware dedicado
@@ -77,22 +79,22 @@ drizzle/                 # migrations geradas
 ```
 Route → Controller → Use Case → Repository (interface)
   ↑          ↑            ↓              ↓
-Multer   Zod+validate  Sharp/mailer   Drizzle → DB (path)
-(borda)       ↓
-            DTO (resposta)
+Multer   Zod+validate  Sharp         Drizzle / jobs (BullMQ)
+(borda)       ↓                              ↓
+            DTO                    Worker → Mailer
 ```
 
 | Camada | Faz | Não faz |
 |--------|-----|---------|
 | **Route** | Path, método, `requireAuth`, **Multer** | Validação de negócio, regra, SQL, Sharp, e-mail |
-| **Controller** | `validate()`, extrai `req.file?.buffer`, chama `useCase.execute()`, mapeia DTO, define status | Acessar `db` / Drizzle; gravar arquivo; enviar e-mail; importar Multer/Sharp |
-| **Use case** | Regras (hash, token, ownership, 404/403/409); recebe **`Buffer`**; chama storage/mailer | Express (`req`/`res`), `req.file`, formato JSON |
+| **Controller** | `validate()`, extrai `req.file?.buffer`, chama `useCase.execute()`, mapeia DTO, define status | Acessar `db` / Drizzle; gravar arquivo; enviar e-mail; importar Multer/Sharp/BullMQ |
+| **Use case** | Regras (hash, token, ownership, 404/403/409); recebe **`Buffer`**; chama storage; enfileira e-mail via repositório de jobs | Express (`req`/`res`), `req.file`, formato JSON, BullMQ, `createTransport` |
 | **Storage (Sharp)** | Redimensionar/normalizar e **salvar em disco**; retornar path | HTTP, Zod, `AppError` de negócio, SQL |
-| **Mailer** | Enviar e-mail (Nodemailer) | HTTP, persistência, Sharp |
-| **Repository** | Persistência. Interface em `*.repository.ts`, impl `drizzle-*.repository.ts` | HTTP, Zod, `AppError` de negócio, I/O de arquivo |
+| **Mailer** | Enviar e-mail (Nodemailer); usado pelo **processor** da fila | HTTP, persistência, Sharp |
+| **Repository** | Persistência Drizzle ou enqueue de job (interface + impl BullMQ) | HTTP, Zod, `AppError` de negócio, I/O de arquivo |
 | **DTO** | Shape estável da resposta (`createdAt` em ISO 8601) | |
 
-Padrão atual: controller instancia o repositório Drizzle e os use cases **no topo do módulo** (singletons). Storage e mailer também entram por injeção no use case — não instanciar Nodemailer/Sharp no controller.
+Padrão atual: controller instancia o repositório Drizzle/jobs e os use cases **no topo do módulo** (singletons). Storage entra por injeção no use case — não instanciar Nodemailer/Sharp/BullMQ no controller (a impl BullMQ do repositório de jobs fica no controller, como as impls Drizzle).
 
 Exceção existente: `requireAuth` consulta `db.query.users` direto. Não espalhar isso; novos acessos a dados vão no repositório.
 
@@ -122,12 +124,14 @@ Regras:
 ### E-mail — reply no meu post
 
 - Transport: **Nodemailer**. Em dev/teste o SMTP é o **Mailpit** (Compose). Sem SendGrid/SES neste projeto.
-- Interface de mailer (porta) + implementação Nodemailer. Use case de criar reply **depende da interface**, não do `createTransport` direto.
-- Disparo **depois** de persistir a reply, no `CreateReplyUseCase` (efeito colateral de negócio, não no controller).
-- Enviar só se `reply.authorId !== post.authorId`. Responder o próprio post **não** gera e-mail.
+- Interface de mailer (porta) + implementação Nodemailer. O **processor** da fila depende da interface; o use case **não** chama o mailer.
+- Depois de persistir a reply, `CreateReplyUseCase` enfileira o job via `ReplyNotificationJobsRepository` (efeito colateral de negócio, não no controller). Não importar BullMQ no use case.
+- Enfileirar só se `reply.authorId !== post.authorId`. Responder o próprio post **não** gera job.
+- Payload do job com dados prontos (não só IDs): `{ to, postId, postTitle, replyAuthorName, replyContent }`. O processor não consulta o banco; monta subject/corpo (excerpt) e envia.
 - Destinatário: e-mail do **autor do post**. Corpo inclui autor da reply, trecho do conteúdo e identificação do post. Não incluir senha/token.
-- Falha de SMTP não deve corromper a reply já gravada; logar/tratar sem rollback da reply (request de criação ainda **201**).
-- Testes: Mailpit real (API HTTP do Mailpit para listar mensagens). Não mockar o mailer nos specs de reply. Limpar a caixa do Mailpit no `beforeEach` junto com o banco.
+- Falha ao enfileirar não deve corromper a reply já gravada; logar/tratar sem rollback (request de criação ainda **201**). Falha de SMTP fica no worker.
+- Worker sobe em `server.ts` (testes usam `createApp()`, sem worker).
+- Testes: spec HTTP de create reply **não** asserta Mailpit (201 + persistência). Spec do processor (`tests/queues/reply-notification.spec.ts`) usa Mailpit real; não mockar o mailer; `cleanMailpit` no `beforeEach`.
 
 ## HTTP
 
@@ -155,7 +159,7 @@ Paths de **avatar** e de foto no create/update de post ficam em `docs/api.md` �
 - Listagem: query `page` (inteiro ≥ 1, default 1), `limit` **fixo 10**, ordem `createdAt` desc. Envelope `{ data, meta: { page, limit, total, totalPages } }`.
 - Post na resposta: `{ id, title, content, createdAt, author: { id, name } }` — nunca e-mail do autor, nunca senha/hash. Incluir path/URL da foto e do avatar do autor quando o contrato definir.
 - Update é **parcial** (`title` e/ou `content` e/ou foto); body `strict` no JSON; pelo menos um campo.
-- Create reply → **201**; além de persistir, notifica o autor do post por e-mail (exceto auto-reply). Delete reply → **204**.
+- Create reply → **201**; além de persistir, enfileira e-mail ao autor do post (exceto auto-reply). Delete reply → **204**.
 
 Erros (sempre este envelope):
 
@@ -193,7 +197,7 @@ Tabelas em `src/db/schema.ts`:
 - `likes`: PK composta (`userId`, `postId`); `postId` em cascade.
 - `replies`: `id` serial, `content`, `createdAt`, `authorId` → `users.id`, `postId` → `posts.id` (cascade). Sem thread.
 
-`.env`: app `localhost:6000/blog`, testes `localhost:6001/blog_test`. SMTP Mailpit `localhost:1025`; UI/API Mailpit `localhost:8025`. Docker Compose com volumes separados (Postgres). Uploads de teste em diretório distinto do de desenvolvimento (`UPLOADS_DIR`).
+`.env`: app `localhost:6000/blog`, testes `localhost:6001/blog_test`. Redis `localhost:6379`. SMTP Mailpit `localhost:1025`; UI/API Mailpit `localhost:8025`. Docker Compose com volumes separados (Postgres + Redis). Uploads de teste em diretório distinto do de desenvolvimento (`UPLOADS_DIR`).
 
 Mudança de schema: editar `schema.ts` → `npm run db:generate` → `npm run db:migrate`. Não editar SQL em `drizzle/` na mão. Não guardar binário de imagem no Postgres.
 
@@ -203,8 +207,8 @@ TDD: para comportamento novo/alterado, começar pelo spec HTTP.
 
 - Arquivos: `tests/<domínio>/<ação>.spec.ts`.
 - `createApp()` + Supertest. Não subir `server.ts`.
-- `beforeEach(cleanDatabase)`, `afterAll(closeDatabase)` (`tests/helpers/database.ts`). Também limpar pasta de uploads de teste e a caixa do Mailpit.
-- Sem mock de banco. Sem mock do mailer nos specs de reply — assertir mensagem no Mailpit. Exercitar auth, validação, 403/404, persistência quando fizer sentido.
+- `beforeEach(cleanDatabase)`, `afterAll(closeDatabase)` (`tests/helpers/database.ts`). Também limpar pasta de uploads de teste. Specs de e-mail: `cleanMailpit` no `beforeEach`.
+- Sem mock de banco. Spec HTTP de reply não asserta Mailpit. Spec do processor da fila: Mailpit real, sem mock do mailer. Exercitar auth, validação, 403/404, persistência quando fizer sentido.
 - Upload: `.attach(...)` no Supertest (buffer em memória). Assertir arquivo em disco + path no banco + URL no DTO.
 - Assertir `status` + `body.error.code` nos erros; shape completo nas respostas de sucesso.
 
@@ -212,7 +216,7 @@ TDD: para comportamento novo/alterado, começar pelo spec HTTP.
 
 1. Alinhar com `docs/api.md` (ou atualizar o contrato **junto** se o pedido mudar o HTTP).
 2. Spec de integração.
-3. Schema Zod → route (Multer se houver arquivo) → controller (Buffer) → use case → storage/mailer + repositório (interface + Drizzle) → DTO.
+3. Schema Zod → route (Multer se houver arquivo) → controller (Buffer) → use case → storage/jobs repository + repositório (interface + Drizzle/BullMQ) → DTO. E-mail: processor da fila → mailer.
 4. Não vazar senha/token hash. Não retornar e-mail no `author` de posts (e-mail só no destino SMTP e no `user` de auth).
 5. Não adicionar logout, perfil completo, admin, soft delete, etc., salvo pedido explícito. Avatar **não** é perfil completo: só o arquivo/path.
 
