@@ -1,0 +1,1177 @@
+openapi: 3.0.3
+info:
+  title: Blog API
+  version: 0.0.0
+  description: |
+    API REST de blog: autenticação por token de sessão, posts, likes, replies, mídia e e-mail de reply.
+
+    Contrato de implementação: [docs/api.md](./api.md).
+
+    ## Convenções
+
+    - Prefixo das rotas de domínio: `/api`. `GET /health` fica fora desse prefixo.
+    - Rotas protegidas exigem `Authorization: Bearer <token>`. O token é hex de 32 bytes, persistido em `users.token`.
+    - Login gera um **novo** token e substitui o anterior.
+    - Senha e hash nunca aparecem nas respostas. O e-mail do autor não entra em posts nem replies (só em auth e em `GET /api/me`).
+    - `createdAt` é ISO 8601 (`date-time`).
+    - IDs de usuário, post e reply são inteiros positivos.
+    - Listagem de posts: `page` ≥ 1 (default `1`), `limit` fixo em **10**, ordem `createdAt` decrescente.
+    - Upload (`PUT /api/me/avatar` e `PUT /api/posts/{id}/image`) é `multipart/form-data`, campo `image`. Demais rotas com body usam `application/json`.
+    - Tipos de imagem: `image/jpeg`, `image/png`, `image/webp`. Tamanho máximo: **5 MiB**. A resposta expõe o path público (`/uploads/...`), nunca o binário.
+    - Erros usam o envelope `error.code` / `error.message` / `error.details` (este último só quando há detalhes, em geral no 400).
+    - `500` (`INTERNAL_ERROR`) pode ocorrer em qualquer rota diante de falha inesperada.
+
+servers:
+  - url: http://localhost:3000
+    description: Servidor local (`PORT`, padrão 3000)
+
+tags:
+  - name: Health
+    description: Disponibilidade do processo HTTP.
+  - name: Auth
+    description: Cadastro e login. Sucesso devolve o token de sessão e o usuário.
+  - name: Me
+    description: Dados e avatar do usuário autenticado.
+  - name: Posts
+    description: Listagem pública, consulta, criação, edição e exclusão de posts.
+  - name: Likes
+    description: Curtir e descurtir posts. Operações idempotentes.
+  - name: Replies
+    description: Respostas em um post (sem thread). Nova reply de outra pessoa enfileira e-mail ao autor do post.
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Health check
+      description: Retorna o status do processo. Não exige autenticação.
+      security: []
+      responses:
+        '200':
+          description: Processo no ar.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: ok
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: Cadastrar usuário
+      security: []
+      description: |
+        Cria o usuário, gera e persiste um token de sessão e o devolve (já autenticado).
+        O e-mail é normalizado para minúsculas. E-mail duplicado responde `409`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              name: Ada Lovelace
+              email: ada@example.com
+              password: secret1
+      responses:
+        '201':
+          description: Usuário criado e autenticado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+              example:
+                token: a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01
+                user:
+                  id: 1
+                  name: Ada Lovelace
+                  email: ada@example.com
+                  avatar: null
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          description: E-mail já cadastrado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: CONFLICT
+                  message: Email already registered
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Entrar
+      security: []
+      description: |
+        Autentica com e-mail e senha. Em sucesso gera e persiste um **novo** token, substituindo o anterior.
+        E-mail inexistente ou senha incorreta devolvem a mesma mensagem, sem revelar qual campo falhou.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: ada@example.com
+              password: secret1
+      responses:
+        '200':
+          description: Autenticado. Token novo no corpo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+              example:
+                token: b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef0123
+                user:
+                  id: 1
+                  name: Ada Lovelace
+                  email: ada@example.com
+                  avatar: /uploads/avatars/1.webp
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: E-mail inexistente ou senha incorreta.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: UNAUTHORIZED
+                  message: Invalid email or password
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/me:
+    get:
+      tags: [Me]
+      operationId: getMe
+      summary: Dados do usuário autenticado
+      description: Retorna id, nome, e-mail e avatar. Não inclui senha, hash nem token.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Usuário da sessão.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              example:
+                id: 1
+                name: Ada Lovelace
+                email: ada@example.com
+                avatar: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/me/avatar:
+    put:
+      tags: [Me]
+      operationId: updateAvatar
+      summary: Atualizar avatar
+      description: |
+        Substitui o avatar do usuário autenticado. O arquivo anterior, se existir, é apagado do disco depois que o path novo é persistido.
+        Campo do arquivo: `image`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ImageUpload'
+      responses:
+        '200':
+          description: Avatar atualizado. `avatar` é o path público do arquivo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              example:
+                id: 1
+                name: Ada Lovelace
+                email: ada@example.com
+                avatar: /uploads/avatars/1.webp
+        '400':
+          description: Arquivo ausente, tipo não permitido, tamanho acima de 5 MiB ou imagem inválida.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missingFile:
+                  summary: Arquivo ausente
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Image file is required
+                      details:
+                        - path: image
+                          message: Image file is required
+                invalidType:
+                  summary: MIME não permitido
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Invalid file type
+                      details:
+                        - path: image
+                          message: File type must be jpeg, png or webp
+                invalidImage:
+                  summary: Imagem não decodificável
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Invalid image
+                      details:
+                        - path: image
+                          message: Invalid image
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/posts:
+    get:
+      tags: [Posts]
+      operationId: listPosts
+      summary: Listar posts
+      security: []
+      description: |
+        Listagem pública, `createdAt` decrescente. Inclui `likesCount` e `image`.
+        Não inclui `likedByMe` nem `replies`. Página vazia devolve `data: []` com `meta` coerente (não é 404).
+      parameters:
+        - $ref: '#/components/parameters/Page'
+      responses:
+        '200':
+          description: Página de posts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostListResponse'
+              example:
+                data:
+                  - id: 1
+                    title: Primeiro post
+                    content: Conteúdo do post.
+                    image: null
+                    createdAt: '2026-08-07T21:00:00.000Z'
+                    likesCount: 0
+                    author:
+                      id: 1
+                      name: Ada Lovelace
+                meta:
+                  page: 1
+                  limit: 10
+                  total: 1
+                  totalPages: 1
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      tags: [Posts]
+      operationId: createPost
+      summary: Criar post
+      description: |
+        Cria um post para o usuário do token. `createdAt` é definido na criação.
+        A imagem começa `null`; o arquivo entra depois em `PUT /api/posts/{id}/image`.
+        A resposta não inclui `likesCount`, `likedByMe` nem `replies`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePostRequest'
+            example:
+              title: Primeiro post
+              content: Conteúdo do post.
+      responses:
+        '201':
+          description: Post criado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Post'
+              example:
+                id: 1
+                title: Primeiro post
+                content: Conteúdo do post.
+                image: null
+                createdAt: '2026-08-07T21:00:00.000Z'
+                author:
+                  id: 1
+                  name: Ada Lovelace
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/posts/{id}:
+    parameters:
+      - $ref: '#/components/parameters/PostId'
+
+    get:
+      tags: [Posts]
+      operationId: getPost
+      summary: Consultar post
+      description: |
+        Consulta pública por id. Inclui `likesCount`, `likedByMe` e todas as `replies` (sem paginação, `createdAt` crescente).
+
+        Autenticação é opcional. Sem o header, `likedByMe` é `false`.
+        Com `Authorization` presente, o token precisa ser válido; caso contrário a resposta é `401`.
+        `likedByMe` é `true` só quando o token é válido e esse usuário já curtiu o post.
+      security:
+        - {}
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Post encontrado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostDetail'
+              example:
+                id: 1
+                title: Primeiro post
+                content: Conteúdo do post.
+                image: /uploads/posts/1.webp
+                createdAt: '2026-08-07T21:00:00.000Z'
+                likesCount: 1
+                likedByMe: false
+                replies:
+                  - id: 1
+                    content: Uma resposta.
+                    createdAt: '2026-08-07T21:05:00.000Z'
+                    author:
+                      id: 2
+                      name: Grace Hopper
+                author:
+                  id: 1
+                  name: Ada Lovelace
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Header `Authorization` presente, mas token ausente, malformado ou inválido.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: UNAUTHORIZED
+                  message: Unauthorized
+        '404':
+          $ref: '#/components/responses/PostNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    put:
+      tags: [Posts]
+      operationId: updatePost
+      summary: Atualizar post
+      description: |
+        Atualização parcial do **próprio** post. Envie `title`, `content` ou ambos. Pelo menos um é obrigatório.
+        Campos extras são rejeitados. Esta rota não altera a imagem (`PUT /api/posts/{id}/image`).
+
+        Post inexistente → `404`. Post de outro autor → `403`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePostRequest'
+            examples:
+              titleOnly:
+                summary: Só o título
+                value:
+                  title: Título revisado
+              both:
+                summary: Título e conteúdo
+                value:
+                  title: Título revisado
+                  content: Conteúdo revisado.
+      responses:
+        '200':
+          description: Post atualizado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Post'
+              example:
+                id: 1
+                title: Título revisado
+                content: Conteúdo do post.
+                image: /uploads/posts/1.webp
+                createdAt: '2026-08-07T21:00:00.000Z'
+                author:
+                  id: 1
+                  name: Ada Lovelace
+        '400':
+          description: '`id` inválido, body vazio, campo inválido ou propriedade extra.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                emptyBody:
+                  summary: Nenhum campo
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Invalid request data
+                      details:
+                        - path: ''
+                          message: At least one of title or content must be provided
+                invalidField:
+                  summary: Campo inválido
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Invalid request data
+                      details:
+                        - path: title
+                          message: 'Too small: expected string to have >=1 characters'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenUpdatePost'
+        '404':
+          $ref: '#/components/responses/PostNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    delete:
+      tags: [Posts]
+      operationId: deletePost
+      summary: Excluir post
+      description: |
+        Hard delete do **próprio** post. Likes e replies daquele post saem em cascade.
+        A imagem do post, se existir, é removida do disco.
+
+        Post inexistente → `404`. Post de outro autor → `403`.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Post excluído. Corpo vazio.
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenDeletePost'
+        '404':
+          $ref: '#/components/responses/PostNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/posts/{id}/image:
+    put:
+      tags: [Posts]
+      operationId: updatePostImage
+      summary: Atualizar imagem do post
+      description: |
+        Substitui a imagem do **próprio** post. O arquivo é obrigatório. Não altera `title` nem `content`.
+        A imagem anterior, se existir, é apagada do disco depois que o path novo é persistido.
+
+        Post inexistente → `404`. Post de outro autor → `403`. A checagem de existência vem antes da de ownership.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ImageUpload'
+      responses:
+        '200':
+          description: Imagem atualizada. `image` é o path público do arquivo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Post'
+              example:
+                id: 1
+                title: Primeiro post
+                content: Conteúdo do post.
+                image: /uploads/posts/1.webp
+                createdAt: '2026-08-07T21:00:00.000Z'
+                author:
+                  id: 1
+                  name: Ada Lovelace
+        '400':
+          description: '`id` inválido, arquivo ausente, tipo não permitido, tamanho acima de 5 MiB ou imagem inválida.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missingFile:
+                  summary: Arquivo ausente
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Image file is required
+                      details:
+                        - path: image
+                          message: Image file is required
+                invalidType:
+                  summary: MIME não permitido
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Invalid file type
+                      details:
+                        - path: image
+                          message: File type must be jpeg, png or webp
+                invalidImage:
+                  summary: Imagem não decodificável
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Invalid image
+                      details:
+                        - path: image
+                          message: Invalid image
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenUpdatePost'
+        '404':
+          $ref: '#/components/responses/PostNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/posts/{id}/likes:
+    post:
+      tags: [Likes]
+      operationId: likePost
+      summary: Curtir post
+      description: |
+        Curtir é idempotente: se o usuário já curtiu, o estado não muda e a resposta continua `204`.
+        O autor pode curtir o próprio post. Sem body.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+      responses:
+        '204':
+          description: Like registrado ou já existente. Corpo vazio.
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/PostNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    delete:
+      tags: [Likes]
+      operationId: unlikePost
+      summary: Descurtir post
+      description: |
+        Remover o like é idempotente: se o usuário não tinha curtido, o estado não muda e a resposta continua `204`.
+        Sem body.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+      responses:
+        '204':
+          description: Like removido ou já ausente. Corpo vazio.
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/PostNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/posts/{id}/replies:
+    post:
+      tags: [Replies]
+      operationId: createReply
+      summary: Responder um post
+      description: |
+        Cria uma reply no post. Não há thread: a reply pertence ao post, nunca a outra reply.
+        Campos extras no body são rejeitados.
+
+        Se o autor da reply não for o autor do post, o sistema enfileira um e-mail para o autor do post
+        (nome de quem respondeu, trecho do conteúdo e identificação do post). Responder o próprio post não gera e-mail.
+        Falha ao enfileirar ou no SMTP não desfaz a reply: a request continua `201`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReplyRequest'
+            example:
+              content: Uma resposta.
+      responses:
+        '201':
+          description: Reply criada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reply'
+              example:
+                id: 1
+                content: Uma resposta.
+                createdAt: '2026-08-07T21:05:00.000Z'
+                author:
+                  id: 2
+                  name: Grace Hopper
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/PostNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/posts/{id}/replies/{replyId}:
+    delete:
+      tags: [Replies]
+      operationId: deleteReply
+      summary: Excluir reply
+      description: |
+        Hard delete da **própria** reply. O autor do post não apaga reply de outra pessoa. Sem body.
+
+        A existência do post e da reply **naquele** post é confirmada antes da checagem de ownership.
+        Post inexistente, reply inexistente ou reply de outro post → `404`. Reply de outro autor → `403`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+        - $ref: '#/components/parameters/ReplyId'
+      responses:
+        '204':
+          description: Reply excluída. Corpo vazio.
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenDeleteReply'
+        '404':
+          description: Post inexistente, ou reply inexistente nesse post.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                postNotFound:
+                  summary: Post inexistente
+                  value:
+                    error:
+                      code: NOT_FOUND
+                      message: Post not found
+                replyNotFound:
+                  summary: Reply inexistente neste post
+                  value:
+                    error:
+                      code: NOT_FOUND
+                      message: Reply not found
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: hex
+      description: |
+        Token de sessão devolvido em `POST /api/auth/register` e `POST /api/auth/login`.
+        Hex de 32 bytes (64 caracteres). Ausente, malformado ou desconhecido → `401`.
+
+  parameters:
+    PostId:
+      name: id
+      in: path
+      required: true
+      description: Id do post. Inteiro positivo (coerção a partir da string da URL).
+      schema:
+        type: integer
+        minimum: 1
+        example: 1
+    ReplyId:
+      name: replyId
+      in: path
+      required: true
+      description: Id da reply. Inteiro positivo (coerção a partir da string da URL).
+      schema:
+        type: integer
+        minimum: 1
+        example: 1
+    Page:
+      name: page
+      in: query
+      required: false
+      description: Página da listagem. Inteiro ≥ 1. Default `1`. `limit` é fixo em 10 e não é parâmetro.
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+        example: 1
+
+  responses:
+    ValidationError:
+      description: Body, params ou query inválidos.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Invalid request data
+              details:
+                - path: email
+                  message: Invalid email address
+                - path: password
+                  message: 'Too small: expected string to have >=6 characters'
+    Unauthorized:
+      description: Token ausente, malformado ou inválido.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: Unauthorized
+    ForbiddenUpdatePost:
+      description: Post existe, mas não pertence ao usuário autenticado.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: FORBIDDEN
+              message: You can only update your own posts
+    ForbiddenDeletePost:
+      description: Post existe, mas não pertence ao usuário autenticado.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: FORBIDDEN
+              message: You can only delete your own posts
+    ForbiddenDeleteReply:
+      description: Reply existe no post, mas não pertence ao usuário autenticado.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: FORBIDDEN
+              message: You can only delete your own replies
+    PostNotFound:
+      description: Post inexistente.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: NOT_FOUND
+              message: Post not found
+    InternalError:
+      description: Falha inesperada. A resposta não inclui stack.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: INTERNAL_ERROR
+              message: Internal server error
+
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required: [path, message]
+      properties:
+        path:
+          type: string
+          description: Caminho do campo (pode ser string vazia em refinements sem path).
+          example: email
+        message:
+          type: string
+          example: Invalid email
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_ERROR
+                - UNAUTHORIZED
+                - FORBIDDEN
+                - NOT_FOUND
+                - CONFLICT
+                - INTERNAL_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              description: Presente em erros de validação. Cada item traz `path` e `message`.
+              items:
+                $ref: '#/components/schemas/ErrorDetail'
+
+    RegisterRequest:
+      type: object
+      required: [name, email, password]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Trim aplicado. Não pode ficar vazio depois do trim.
+          example: Ada Lovelace
+        email:
+          type: string
+          format: email
+          description: Normalizado para minúsculas. Único no banco.
+          example: ada@example.com
+        password:
+          type: string
+          minLength: 6
+          format: password
+          example: secret1
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          description: Normalizado para minúsculas.
+          example: ada@example.com
+        password:
+          type: string
+          minLength: 6
+          format: password
+          example: secret1
+
+    CreatePostRequest:
+      type: object
+      required: [title, content]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Trim aplicado. Não pode ficar vazio depois do trim.
+          example: Primeiro post
+        content:
+          type: string
+          minLength: 1
+          description: Trim aplicado. Não pode ficar vazio depois do trim. Sem tamanho máximo.
+          example: Conteúdo do post.
+
+    UpdatePostRequest:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      description: |
+        Pelo menos um de `title` ou `content`. Propriedades extras são rejeitadas (`400`).
+        Body vazio: `At least one of title or content must be provided`.
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Se enviado, trim e comprimento 1–200.
+          example: Título revisado
+        content:
+          type: string
+          minLength: 1
+          description: Se enviado, trim e comprimento ≥ 1.
+          example: Conteúdo revisado.
+
+    CreateReplyRequest:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+          description: Trim aplicado. Não pode ficar vazio depois do trim.
+          example: Uma resposta.
+
+    ImageUpload:
+      type: object
+      additionalProperties: false
+      required: [image]
+      properties:
+        image:
+          type: string
+          format: binary
+          description: |
+            Arquivo obrigatório. MIME `image/jpeg`, `image/png` ou `image/webp`.
+            Tamanho máximo 5 MiB. Imagem que não decodifica → `400`.
+
+    Author:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      description: Autor público. Nunca inclui e-mail.
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          example: 1
+        name:
+          type: string
+          example: Ada Lovelace
+
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, name, email, avatar]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          example: 1
+        name:
+          type: string
+          example: Ada Lovelace
+        email:
+          type: string
+          format: email
+          example: ada@example.com
+        avatar:
+          type: string
+          nullable: true
+          description: Path público do avatar (`/uploads/avatars/...`) ou `null`.
+          example: /uploads/avatars/1.webp
+
+    AuthResponse:
+      type: object
+      additionalProperties: false
+      required: [token, user]
+      properties:
+        token:
+          type: string
+          description: Token de sessão (hex, 32 bytes).
+          example: a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01
+        user:
+          $ref: '#/components/schemas/User'
+
+    Post:
+      type: object
+      additionalProperties: false
+      required: [id, title, content, image, createdAt, author]
+      description: Post sem `likesCount`, `likedByMe` e `replies`. Usado em criar, atualizar e atualizar imagem.
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          example: 1
+        title:
+          type: string
+          example: Primeiro post
+        content:
+          type: string
+          example: Conteúdo do post.
+        image:
+          type: string
+          nullable: true
+          description: Path público da foto (`/uploads/posts/...`) ou `null`.
+          example: /uploads/posts/1.webp
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-08-07T21:00:00.000Z'
+        author:
+          $ref: '#/components/schemas/Author'
+
+    PostListItem:
+      type: object
+      additionalProperties: false
+      required: [id, title, content, image, createdAt, likesCount, author]
+      description: Item da listagem. Inclui `likesCount`. Não inclui `likedByMe` nem `replies`.
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          example: 1
+        title:
+          type: string
+          example: Primeiro post
+        content:
+          type: string
+          example: Conteúdo do post.
+        image:
+          type: string
+          nullable: true
+          description: Path público da foto (`/uploads/posts/...`) ou `null`.
+          example: null
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-08-07T21:00:00.000Z'
+        likesCount:
+          type: integer
+          minimum: 0
+          description: '`0` quando o post não tem likes.'
+          example: 0
+        author:
+          $ref: '#/components/schemas/Author'
+
+    Reply:
+      type: object
+      additionalProperties: false
+      required: [id, content, createdAt, author]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          example: 1
+        content:
+          type: string
+          example: Uma resposta.
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-08-07T21:05:00.000Z'
+        author:
+          $ref: '#/components/schemas/Author'
+
+    PostDetail:
+      type: object
+      additionalProperties: false
+      required: [id, title, content, image, createdAt, likesCount, likedByMe, replies, author]
+      description: Consulta por id. Inclui `likesCount`, `likedByMe` e todas as replies.
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          example: 1
+        title:
+          type: string
+          example: Primeiro post
+        content:
+          type: string
+          example: Conteúdo do post.
+        image:
+          type: string
+          nullable: true
+          description: Path público da foto (`/uploads/posts/...`) ou `null`.
+          example: /uploads/posts/1.webp
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-08-07T21:00:00.000Z'
+        likesCount:
+          type: integer
+          minimum: 0
+          description: '`0` quando o post não tem likes.'
+          example: 0
+        likedByMe:
+          type: boolean
+          description: |
+            `true` somente com token válido e like desse usuário.
+            Sem header, ou autenticado sem like, é `false`.
+          example: false
+        replies:
+          type: array
+          description: Todas as replies do post, `createdAt` crescente. Sem paginação.
+          items:
+            $ref: '#/components/schemas/Reply'
+        author:
+          $ref: '#/components/schemas/Author'
+
+    PaginationMeta:
+      type: object
+      additionalProperties: false
+      required: [page, limit, total, totalPages]
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          example: 1
+        limit:
+          type: integer
+          description: Fixo em 10.
+          example: 10
+        total:
+          type: integer
+          minimum: 0
+          example: 42
+        totalPages:
+          type: integer
+          minimum: 0
+          description: '`ceil(total / limit)`. `0` quando não há posts.'
+          example: 5
+
+    PostListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PostListItem'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
