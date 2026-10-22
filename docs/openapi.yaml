@@ -3,7 +3,7 @@ info:
   title: Blog API
   version: 0.0.0
   description: |
-    API REST de blog: autenticação por token de sessão, posts, likes, replies, mídia e e-mail de reply.
+    API REST de blog: autenticação por token de sessão, posts, likes, replies, mídia, e-mail de reply e acesso premium.
 
     Contrato de implementação: [docs/api.md](./api.md).
 
@@ -13,6 +13,8 @@ info:
     - Rotas protegidas exigem `Authorization: Bearer <token>`. O token é hex de 32 bytes, persistido em `users.token`.
     - Login gera um **novo** token e substitui o anterior.
     - Senha e hash nunca aparecem nas respostas. O e-mail do autor não entra em posts nem replies (só em auth e em `GET /api/me`).
+    - `premium` (boolean) entra em `GET /api/me` e em todo JSON de post. Não entra em register, login, avatar nem no objeto `author`.
+    - Posts premium só aparecem para um token válido de usuário premium. Para os demais, o post premium é `404` `"Post not found"`, igual a um post inexistente.
     - `createdAt` é ISO 8601 (`date-time`).
     - IDs de usuário, post e reply são inteiros positivos.
     - Listagem de posts: `page` ≥ 1 (default `1`), `limit` fixo em **10**, ordem `createdAt` decrescente.
@@ -31,9 +33,11 @@ tags:
   - name: Auth
     description: Cadastro e login. Sucesso devolve o token de sessão e o usuário.
   - name: Me
-    description: Dados e avatar do usuário autenticado.
+    description: Dados, avatar e checkout do usuário autenticado.
   - name: Posts
-    description: Listagem pública, consulta, criação, edição e exclusão de posts.
+    description: Listagem, consulta, criação, edição e exclusão de posts. Posts premium exigem leitor premium.
+  - name: Webhook
+    description: Notificações do Stripe. A marca premium do usuário nasce em `checkout.session.completed`.
   - name: Likes
     description: Curtir e descurtir posts. Operações idempotentes.
   - name: Replies
@@ -159,7 +163,9 @@ paths:
       tags: [Me]
       operationId: getMe
       summary: Dados do usuário autenticado
-      description: Retorna id, nome, e-mail e avatar. Não inclui senha, hash nem token.
+      description: |
+        Retorna id, nome, e-mail, avatar e `premium`. Não inclui senha, hash nem token.
+        `premium` é `false` até o webhook `checkout.session.completed` marcar o usuário.
       security:
         - bearerAuth: []
       responses:
@@ -168,14 +174,55 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/User'
+                $ref: '#/components/schemas/Me'
               example:
                 id: 1
                 name: Ada Lovelace
                 email: ada@example.com
                 avatar: null
+                premium: false
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/me/checkout:
+    post:
+      tags: [Me]
+      operationId: createCheckout
+      summary: Iniciar checkout premium
+      description: |
+        Cria uma Checkout Session de pagamento único no Stripe e devolve somente a URL.
+        Não concede o acesso e não altera o usuário.
+
+        A sessão usa `mode: payment`, o preço `STRIPE_PRICE_ID`, `success_url` e `cancel_url` do ambiente,
+        `client_reference_id` com o id do usuário autenticado e `customer_email` com o e-mail dele.
+
+        Usuário que já é premium recebe `409` e a sessão não é criada.
+        Sem body, params ou query.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: URL da Checkout Session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutSession'
+              example:
+                url: https://checkout.stripe.com/c/pay/cs_test_a1b2c3
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Usuário já é premium. A sessão no Stripe não é criada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: CONFLICT
+                  message: User is already premium
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -186,7 +233,7 @@ paths:
       summary: Atualizar avatar
       description: |
         Substitui o avatar do usuário autenticado. O arquivo anterior, se existir, é apagado do disco depois que o path novo é persistido.
-        Campo do arquivo: `image`.
+        Campo do arquivo: `image`. A resposta não inclui `premium`.
       security:
         - bearerAuth: []
       requestBody:
@@ -246,15 +293,92 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/webhook/stripe:
+    post:
+      tags: [Webhook]
+      operationId: stripeWebhook
+      summary: Receber webhook do Stripe
+      description: |
+        Não usa Bearer. A autenticidade é o header `Stripe-Signature`, verificado com `STRIPE_WEBHOOK_SECRET`
+        sobre o body cru (os bytes originais, antes do parse JSON).
+
+        No evento `checkout.session.completed`, lê `client_reference_id`:
+        - id de um usuário existente → `users.premium` passa a `true` (se já era `true`, permanece) e a resposta é `200` com corpo vazio;
+        - id que não é de um usuário → `200` e nada muda;
+        - `client_reference_id` ausente → `400`.
+
+        Outro tipo de evento, com assinatura válida, responde `200` e é ignorado.
+        Nenhum outro evento altera `premium`. Voltar da `success_url` não concede o acesso.
+      security: []
+      parameters:
+        - name: Stripe-Signature
+          in: header
+          required: true
+          description: Assinatura do Stripe, verificada com `STRIPE_WEBHOOK_SECRET`.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: Payload do evento, como o Stripe enviou.
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Evento Stripe. A verificação usa os bytes crus deste body.
+              additionalProperties: true
+            example:
+              id: evt_test_checkout_completed
+              object: event
+              type: checkout.session.completed
+              data:
+                object:
+                  id: cs_test_a1b2c3
+                  object: checkout.session
+                  client_reference_id: '1'
+      responses:
+        '200':
+          description: |
+            Corpo vazio. A assinatura é válida e, se o evento é `checkout.session.completed`,
+            `client_reference_id` veio preenchido. Outros eventos assinados também respondem `200`.
+        '400':
+          description: Assinatura ausente ou inválida, ou `checkout.session.completed` sem `client_reference_id`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalidSignature:
+                  summary: Assinatura ausente ou inválida
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Invalid Stripe webhook
+                missingClientReference:
+                  summary: checkout.session.completed sem client_reference_id
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Missing client_reference_id
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/posts:
     get:
       tags: [Posts]
       operationId: listPosts
       summary: Listar posts
-      security: []
       description: |
-        Listagem pública, `createdAt` decrescente. Inclui `likesCount` e `image`.
+        `createdAt` decrescente. Inclui `likesCount`, `image` e `premium`.
         Não inclui `likedByMe` nem `replies`. Página vazia devolve `data: []` com `meta` coerente (não é 404).
+
+        Autenticação é opcional.
+        Sem token, ou com token válido de usuário não premium, a lista traz só posts com `premium: false`.
+        Token válido de usuário premium mistura posts premium e não premium, na mesma ordem.
+        `meta.total` e `meta.totalPages` contam só os posts visíveis naquele pedido.
+        Header `Authorization` presente com token inválido → `401`.
+      security:
+        - {}
+        - bearerAuth: []
       parameters:
         - $ref: '#/components/parameters/Page'
       responses:
@@ -270,6 +394,7 @@ paths:
                     title: Primeiro post
                     content: Conteúdo do post.
                     image: null
+                    premium: false
                     createdAt: '2026-08-07T21:00:00.000Z'
                     likesCount: 0
                     author:
@@ -282,6 +407,16 @@ paths:
                   totalPages: 1
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Header `Authorization` presente, mas token ausente, malformado ou inválido.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: UNAUTHORIZED
+                  message: Unauthorized
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -293,6 +428,9 @@ paths:
         Cria um post para o usuário do token. `createdAt` é definido na criação.
         A imagem começa `null`; o arquivo entra depois em `PUT /api/posts/{id}/image`.
         A resposta não inclui `likesCount`, `likedByMe` nem `replies`.
+
+        `premium` é opcional. Ausente ou `false` grava `premium: false`.
+        `true` só é aceito se o autor já for premium; caso contrário `403` e nada é gravado.
       security:
         - bearerAuth: []
       requestBody:
@@ -301,9 +439,18 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CreatePostRequest'
-            example:
-              title: Primeiro post
-              content: Conteúdo do post.
+            examples:
+              public:
+                summary: Post público (`premium` ausente)
+                value:
+                  title: Primeiro post
+                  content: Conteúdo do post.
+              premium:
+                summary: Post premium (só autor premium)
+                value:
+                  title: Post exclusivo
+                  content: Conteúdo premium.
+                  premium: true
       responses:
         '201':
           description: Post criado.
@@ -316,6 +463,7 @@ paths:
                 title: Primeiro post
                 content: Conteúdo do post.
                 image: null
+                premium: false
                 createdAt: '2026-08-07T21:00:00.000Z'
                 author:
                   id: 1
@@ -324,6 +472,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenPremiumPost'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -336,11 +486,14 @@ paths:
       operationId: getPost
       summary: Consultar post
       description: |
-        Consulta pública por id. Inclui `likesCount`, `likedByMe` e todas as `replies` (sem paginação, `createdAt` crescente).
+        Consulta por id. Inclui `likesCount`, `likedByMe`, `premium` e todas as `replies` (sem paginação, `createdAt` crescente).
 
         Autenticação é opcional. Sem o header, `likedByMe` é `false`.
-        Com `Authorization` presente, o token precisa ser válido; caso contrário a resposta é `401`.
+        Com `Authorization` presente, o token precisa ser válido; caso contrário a resposta é `401`, antes de olhar o post.
         `likedByMe` é `true` só quando o token é válido e esse usuário já curtiu o post.
+
+        Post premium é `404` `"Post not found"` sem token e com token válido de usuário não premium.
+        Post inexistente usa o mesmo erro.
       security:
         - {}
         - bearerAuth: []
@@ -356,6 +509,7 @@ paths:
                 title: Primeiro post
                 content: Conteúdo do post.
                 image: /uploads/posts/1.webp
+                premium: false
                 createdAt: '2026-08-07T21:00:00.000Z'
                 likesCount: 1
                 likedByMe: false
@@ -391,10 +545,16 @@ paths:
       operationId: updatePost
       summary: Atualizar post
       description: |
-        Atualização parcial do **próprio** post. Envie `title`, `content` ou ambos. Pelo menos um é obrigatório.
-        Campos extras são rejeitados. Esta rota não altera a imagem (`PUT /api/posts/{id}/image`).
+        Atualização parcial do **próprio** post. Envie `title`, `content`, `premium` ou qualquer combinação.
+        Pelo menos um desses campos é obrigatório. Campos extras são rejeitados.
+        Esta rota não altera a imagem (`PUT /api/posts/{id}/image`).
 
-        Post inexistente → `404`. Post de outro autor → `403`.
+        `premium` ausente não muda a marca. `false` pode ser enviado por qualquer autor no próprio post.
+        `true` só pelo autor que já é premium; caso contrário `403` e nada do body é gravado.
+
+        Post inexistente, ou premium visto por quem não é premium → `404`.
+        Post visível de outro autor → `403` de ownership.
+        Autor não premium enviando `premium: true` → `403` da marca.
       security:
         - bearerAuth: []
       requestBody:
@@ -413,6 +573,10 @@ paths:
                 value:
                   title: Título revisado
                   content: Conteúdo revisado.
+              premiumOnly:
+                summary: Só a marca premium
+                value:
+                  premium: true
       responses:
         '200':
           description: Post atualizado.
@@ -425,12 +589,13 @@ paths:
                 title: Título revisado
                 content: Conteúdo do post.
                 image: /uploads/posts/1.webp
+                premium: false
                 createdAt: '2026-08-07T21:00:00.000Z'
                 author:
                   id: 1
                   name: Ada Lovelace
         '400':
-          description: '`id` inválido, body vazio, campo inválido ou propriedade extra.'
+          description: '`id` inválido, body vazio, campo inválido, `premium` com tipo inválido ou propriedade extra.'
           content:
             application/json:
               schema:
@@ -444,7 +609,7 @@ paths:
                       message: Invalid request data
                       details:
                         - path: ''
-                          message: At least one of title or content must be provided
+                          message: At least one of title, content or premium must be provided
                 invalidField:
                   summary: Campo inválido
                   value:
@@ -457,7 +622,26 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/ForbiddenUpdatePost'
+          description: |
+            Post visível de outro autor, ou autor não premium enviou `premium: true`.
+            No segundo caso, nada do body é gravado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                notOwner:
+                  summary: Post de outro autor
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: You can only update your own posts
+                notPremium:
+                  summary: Autor não premium marcou o post como premium
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: Only premium users can mark posts as premium
         '404':
           $ref: '#/components/responses/PostNotFound'
         '500':
@@ -471,7 +655,9 @@ paths:
         Hard delete do **próprio** post. Likes e replies daquele post saem em cascade.
         A imagem do post, se existir, é removida do disco.
 
-        Post inexistente → `404`. Post de outro autor → `403`.
+        Post inexistente, ou premium visto por quem não é premium → `404`.
+        Post visível de outro autor → `403`.
+        Token ausente ou inválido → `401`, antes de olhar o post.
       security:
         - bearerAuth: []
       responses:
@@ -494,10 +680,11 @@ paths:
       operationId: updatePostImage
       summary: Atualizar imagem do post
       description: |
-        Substitui a imagem do **próprio** post. O arquivo é obrigatório. Não altera `title` nem `content`.
+        Substitui a imagem do **próprio** post. O arquivo é obrigatório. Não altera `title`, `content` nem `premium`.
         A imagem anterior, se existir, é apagada do disco depois que o path novo é persistido.
 
-        Post inexistente → `404`. Post de outro autor → `403`. A checagem de existência vem antes da de ownership.
+        Post inexistente, ou premium visto por quem não é premium → `404`.
+        Post visível de outro autor → `403`. A visibilidade é checada antes da ownership.
       security:
         - bearerAuth: []
       parameters:
@@ -520,6 +707,7 @@ paths:
                 title: Primeiro post
                 content: Conteúdo do post.
                 image: /uploads/posts/1.webp
+                premium: false
                 createdAt: '2026-08-07T21:00:00.000Z'
                 author:
                   id: 1
@@ -575,6 +763,9 @@ paths:
       description: |
         Curtir é idempotente: se o usuário já curtiu, o estado não muda e a resposta continua `204`.
         O autor pode curtir o próprio post. Sem body.
+
+        Post premium visto por quem não é premium → `404` `"Post not found"`.
+        Token ausente ou inválido → `401`, antes de olhar o post.
       security:
         - bearerAuth: []
       parameters:
@@ -598,6 +789,9 @@ paths:
       description: |
         Remover o like é idempotente: se o usuário não tinha curtido, o estado não muda e a resposta continua `204`.
         Sem body.
+
+        Post premium visto por quem não é premium → `404` `"Post not found"`.
+        Token ausente ou inválido → `401`, antes de olhar o post.
       security:
         - bearerAuth: []
       parameters:
@@ -626,6 +820,9 @@ paths:
         Se o autor da reply não for o autor do post, o sistema enfileira um e-mail para o autor do post
         (nome de quem respondeu, trecho do conteúdo e identificação do post). Responder o próprio post não gera e-mail.
         Falha ao enfileirar ou no SMTP não desfaz a reply: a request continua `201`.
+
+        Reply em post premium só é criada por quem já passou na visibilidade.
+        Quem não é premium recebe `404` `"Post not found"`. O objeto `author` da reply não inclui `premium`.
       security:
         - bearerAuth: []
       parameters:
@@ -669,8 +866,10 @@ paths:
       description: |
         Hard delete da **própria** reply. O autor do post não apaga reply de outra pessoa. Sem body.
 
-        A existência do post e da reply **naquele** post é confirmada antes da checagem de ownership.
-        Post inexistente, reply inexistente ou reply de outro post → `404`. Reply de outro autor → `403`.
+        Para quem não é premium, post premium e post inexistente são o mesmo `404` `"Post not found"`,
+        também quando o id da reply está errado.
+        Nos demais casos, a existência do post e da reply **naquele** post é confirmada antes da ownership.
+        Reply inexistente ou de outro post → `404` `"Reply not found"`. Reply de outro autor → `403`.
       security:
         - bearerAuth: []
       parameters:
@@ -686,7 +885,9 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenDeleteReply'
         '404':
-          description: Post inexistente, ou reply inexistente nesse post.
+          description: |
+            Post inexistente ou premium visto por quem não é premium (`"Post not found"`),
+            inclusive com id de reply errado. Nos demais casos, reply inexistente nesse post (`"Reply not found"`).
           content:
             application/json:
               schema:
@@ -773,6 +974,16 @@ components:
             error:
               code: UNAUTHORIZED
               message: Unauthorized
+    ForbiddenPremiumPost:
+      description: "Usuário autenticado não premium enviou `premium: true`. Nada é gravado."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: FORBIDDEN
+              message: Only premium users can mark posts as premium
     ForbiddenUpdatePost:
       description: Post existe, mas não pertence ao usuário autenticado.
       content:
@@ -804,7 +1015,9 @@ components:
               code: FORBIDDEN
               message: You can only delete your own replies
     PostNotFound:
-      description: Post inexistente.
+      description: |
+        Post inexistente, ou post premium visto por quem não é premium.
+        Os dois casos usam a mesma mensagem, `"Post not found"`.
       content:
         application/json:
           schema:
@@ -925,14 +1138,21 @@ components:
           minLength: 1
           description: Trim aplicado. Não pode ficar vazio depois do trim. Sem tamanho máximo.
           example: Conteúdo do post.
+        premium:
+          type: boolean
+          description: |
+            Opcional. Ausente ou `false` grava o post como não premium.
+            `true` só é aceito se o autor já for premium; caso contrário `403` e nada é gravado.
+          example: false
 
     UpdatePostRequest:
       type: object
       minProperties: 1
       additionalProperties: false
       description: |
-        Pelo menos um de `title` ou `content`. Propriedades extras são rejeitadas (`400`).
-        Body vazio: `At least one of title or content must be provided`.
+        Pelo menos um de `title`, `content` ou `premium`. Propriedades extras são rejeitadas (`400`).
+        Body vazio: `At least one of title, content or premium must be provided`.
+        `premium` ausente não altera a marca. `true` só pelo autor premium; senão `403` e nada é gravado.
       properties:
         title:
           type: string
@@ -945,6 +1165,12 @@ components:
           minLength: 1
           description: Se enviado, trim e comprimento ≥ 1.
           example: Conteúdo revisado.
+        premium:
+          type: boolean
+          description: |
+            Opcional. Ausente não muda a marca. `false` pode ser enviado por qualquer autor no próprio post.
+            `true` só pelo autor que já é premium.
+          example: true
 
     CreateReplyRequest:
       type: object
@@ -973,7 +1199,7 @@ components:
       type: object
       additionalProperties: false
       required: [id, name]
-      description: Autor público. Nunca inclui e-mail.
+      description: Autor público. Nunca inclui e-mail nem `premium`.
       properties:
         id:
           type: integer
@@ -986,6 +1212,7 @@ components:
     User:
       type: object
       additionalProperties: false
+      description: Usuário de register, login e avatar. Não inclui `premium`.
       required: [id, name, email, avatar]
       properties:
         id:
@@ -1005,6 +1232,46 @@ components:
           description: Path público do avatar (`/uploads/avatars/...`) ou `null`.
           example: /uploads/avatars/1.webp
 
+    Me:
+      type: object
+      additionalProperties: false
+      description: Usuário autenticado em `GET /api/me`. Inclui `premium`.
+      required: [id, name, email, avatar, premium]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          example: 1
+        name:
+          type: string
+          example: Ada Lovelace
+        email:
+          type: string
+          format: email
+          example: ada@example.com
+        avatar:
+          type: string
+          nullable: true
+          description: Path público do avatar (`/uploads/avatars/...`) ou `null`.
+          example: /uploads/avatars/1.webp
+        premium:
+          type: boolean
+          description: |
+            `false` até o webhook `checkout.session.completed` marcar o usuário.
+            Não expira. Não entra em register, login nem em `PUT /api/me/avatar`.
+          example: false
+
+    CheckoutSession:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: URL hospedada da Checkout Session. Único campo da resposta.
+          example: https://checkout.stripe.com/c/pay/cs_test_a1b2c3
+
     AuthResponse:
       type: object
       additionalProperties: false
@@ -1020,7 +1287,7 @@ components:
     Post:
       type: object
       additionalProperties: false
-      required: [id, title, content, image, createdAt, author]
+      required: [id, title, content, image, premium, createdAt, author]
       description: Post sem `likesCount`, `likedByMe` e `replies`. Usado em criar, atualizar e atualizar imagem.
       properties:
         id:
@@ -1038,6 +1305,10 @@ components:
           nullable: true
           description: Path público da foto (`/uploads/posts/...`) ou `null`.
           example: /uploads/posts/1.webp
+        premium:
+          type: boolean
+          description: '`true` quando o autor premium marcou o post. Default na criação: `false`.'
+          example: false
         createdAt:
           type: string
           format: date-time
@@ -1048,8 +1319,8 @@ components:
     PostListItem:
       type: object
       additionalProperties: false
-      required: [id, title, content, image, createdAt, likesCount, author]
-      description: Item da listagem. Inclui `likesCount`. Não inclui `likedByMe` nem `replies`.
+      required: [id, title, content, image, premium, createdAt, likesCount, author]
+      description: Item da listagem. Inclui `likesCount` e `premium`. Não inclui `likedByMe` nem `replies`.
       properties:
         id:
           type: integer
@@ -1066,6 +1337,10 @@ components:
           nullable: true
           description: Path público da foto (`/uploads/posts/...`) ou `null`.
           example: null
+        premium:
+          type: boolean
+          description: '`true` quando o post é premium. A listagem pública omite esses posts.'
+          example: false
         createdAt:
           type: string
           format: date-time
@@ -1100,8 +1375,8 @@ components:
     PostDetail:
       type: object
       additionalProperties: false
-      required: [id, title, content, image, createdAt, likesCount, likedByMe, replies, author]
-      description: Consulta por id. Inclui `likesCount`, `likedByMe` e todas as replies.
+      required: [id, title, content, image, premium, createdAt, likesCount, likedByMe, replies, author]
+      description: Consulta por id. Inclui `likesCount`, `likedByMe`, `premium` e todas as replies.
       properties:
         id:
           type: integer
@@ -1118,6 +1393,10 @@ components:
           nullable: true
           description: Path público da foto (`/uploads/posts/...`) ou `null`.
           example: /uploads/posts/1.webp
+        premium:
+          type: boolean
+          description: '`true` quando o post é premium. Quem não é premium não recebe este objeto: a resposta é `404`.'
+          example: false
         createdAt:
           type: string
           format: date-time
@@ -1157,6 +1436,7 @@ components:
         total:
           type: integer
           minimum: 0
+          description: Quantidade de posts visíveis para o pedido, não o total geral quando há posts premium ocultos.
           example: 42
         totalPages:
           type: integer
