@@ -7,11 +7,12 @@ Antes de mudar comportamento HTTP, conferir `docs/api.md`. Não inventar endpoin
 ## O que o projeto faz
 
 - Cadastro e login geram um **token de sessão** (hex, 32 bytes) persistido em `users.token` e devolvido ao cliente.
-- Listagem e GET de post são **públicos**. Criar/editar/excluir exigem `Authorization: Bearer <token>`. GET por id aceita token **opcional** (`likedByMe`).
+- Listagem e GET de post são **públicos** para posts não premium. Os dois aceitam token **opcional**. GET por id usa o token para `likedByMe`. Token inválido → **401**. Usuário premium vê posts premium e públicos na mesma ordem (`createdAt` desc). Quem não é premium recebe **404** `"Post not found"` em post premium, igual a post inexistente.
 - Um usuário só edita/exclui **os próprios posts** (hard delete). Likes e replies em cascade com o post.
 - Usuário autenticado curte/descurte posts e cria replies. Só o **autor da reply** apaga a própria reply.
 - Foto opcional no post e **avatar** no usuário: arquivo em disco, **path** no banco.
 - Nova reply em um post **de outra pessoa** dispara e-mail ao autor do post (Nodemailer + Mailpit em dev/teste).
+- Um usuário fica premium só no webhook `checkout.session.completed`, quando `client_reference_id` é o id dele. Não expira. Só autor premium marca um post como premium (`premium: true`); os demais recebem **403**. `POST /api/me/checkout` de quem já é premium responde **409** e não cria sessão.
 - Sem logout, papéis, soft delete, threads, like em reply, tags ou troca de senha.
 
 ## Stack
@@ -143,7 +144,7 @@ Prefixo da API: `/api`. Health: `GET /health` (fora de `/api`).
 | `POST` | `/api/auth/login` | não |
 | `POST` | `/api/me/checkout` | sim |
 | `POST` | `/api/webhook/stripe` | não |
-| `GET` | `/api/posts` | não |
+| `GET` | `/api/posts` | opcional |
 | `GET` | `/api/posts/:id` | opcional |
 | `POST` | `/api/posts` | sim |
 | `PUT` | `/api/posts/:id` | sim |
@@ -155,14 +156,15 @@ Prefixo da API: `/api`. Health: `GET /health` (fora de `/api`).
 
 Paths de **avatar** e de foto no create/update de post ficam em `docs/api.md` — atualizar o contrato **junto** com a feature. Upload é `multipart/form-data` nessas rotas; o restante da API continua `application/json`.
 
-`POST /api/webhook/stripe` não usa Bearer. O router do webhook é montado **antes** de `express.json()`, com `express.raw` na rota, para verificar `STRIPE_WEBHOOK_SECRET` sobre o body cru. Observa `checkout.session.completed`, lê `client_reference_id` e não persiste nada. **200** se a assinatura é válida (e, nesse evento, se o id veio); **400** se a assinatura falha ou o id falta. Outros eventos assinados respondem **200** e são ignorados.
+`POST /api/webhook/stripe` não usa Bearer. O router do webhook é montado **antes** de `express.json()`, com `express.raw` na rota, para verificar `STRIPE_WEBHOOK_SECRET` sobre o body cru. Observa `checkout.session.completed`, lê `client_reference_id` e, se o id é de um usuário, grava `users.premium = true` (reenvio mantém `true`; id desconhecido não muda nada). **200** se a assinatura é válida (e, nesse evento, se o id veio); **400** se a assinatura falha ou o id falta. Outros eventos assinados respondem **200** e são ignorados.
 
 - Register → **201** `{ token, user: { id, name, email } }` (já autenticado). Incluir `avatar` no user quando o campo existir no contrato.
 - Login → **200** mesmo shape; gera **novo** token (substitui o anterior na coluna).
 - Create post → **201**; update → **200**; delete → **204** corpo vazio. Foto opcional: campo de arquivo na borda; JSON `title`/`content` no mesmo multipart.
 - Listagem: query `page` (inteiro ≥ 1, default 1), `limit` **fixo 10**, ordem `createdAt` desc. Envelope `{ data, meta: { page, limit, total, totalPages } }`.
-- Post na resposta: `{ id, title, content, createdAt, author: { id, name } }` — nunca e-mail do autor, nunca senha/hash. Incluir path/URL da foto e do avatar do autor quando o contrato definir.
-- Update é **parcial** (`title` e/ou `content` e/ou foto); body `strict` no JSON; pelo menos um campo.
+- `GET /api/me` inclui `premium`. Register, login e `PUT /api/me/avatar` não.
+- Post na resposta: `{ id, title, content, premium, createdAt, author: { id, name } }` — nunca e-mail do autor, nunca senha/hash, nunca `premium` no `author`. Incluir path/URL da foto e do avatar do autor quando o contrato definir.
+- Update é **parcial** (`title` e/ou `content` e/ou `premium`); body `strict` no JSON; pelo menos um campo. Foto continua no endpoint de imagem.
 - Create reply → **201**; além de persistir, enfileira e-mail ao autor do post (exceto auto-reply). Delete reply → **204**.
 
 Erros (sempre este envelope):
@@ -187,8 +189,8 @@ Lançar `new AppError(status, code, message, details?)`. O `errorHandler` serial
 ## Autenticação
 
 - Header: `Authorization: Bearer <token>`. Ausente, malformado, vazio ou desconhecido → 401 `Unauthorized`.
-- Token válido: `req.user = { id, name, email }`.
-- Ownership (editar/excluir post de outro) → 403 no **use case**, depois de confirmar que o post existe (404 se não existir).
+- Token válido: `req.user = { id, name, email, premium }`.
+- Post premium visto por quem não é premium → 404 no **use case**, antes do ownership. Ownership (editar/excluir post de outro) → 403, depois de confirmar que o post existe e é visível (404 se não existir).
 - Login com e-mail/senha errados → 401 genérico `"Invalid email or password"` (não revelar qual falhou).
 - E-mail duplicado no register → 409 `"Email already registered"`. E-mail é normalizado para lowercase.
 
@@ -196,8 +198,8 @@ Lançar `new AppError(status, code, message, details?)`. O `errorHandler` serial
 
 Tabelas em `src/db/schema.ts`:
 
-- `users`: `id` serial, `name`, `email` unique, `password` (hash), `token` nullable, `avatarPath` nullable (path relativo em disco).
-- `posts`: `id` serial, `title`, `content`, `createdAt` (`created_at` timestamptz), `authorId` → `users.id`, `photoPath` nullable (path relativo em disco).
+- `users`: `id` serial, `name`, `email` unique, `password` (hash), `token` nullable, `avatarPath` nullable (path relativo em disco), `premium` boolean default `false`.
+- `posts`: `id` serial, `title`, `content`, `createdAt` (`created_at` timestamptz), `authorId` → `users.id`, `photoPath` nullable (path relativo em disco), `premium` boolean default `false`.
 - `likes`: PK composta (`userId`, `postId`); `postId` em cascade.
 - `replies`: `id` serial, `content`, `createdAt`, `authorId` → `users.id`, `postId` → `posts.id` (cascade). Sem thread.
 
@@ -226,4 +228,4 @@ TDD: para comportamento novo/alterado, começar pelo spec HTTP.
 
 ## Fora de escopo (PRD)
 
-Troca de senha, logout/invalidação explícita, roles, soft delete, rascunhos, slug, threads de reply, like em reply, tags, provedor de e-mail externo (SES/SendGrid), armazenamento de imagem em S3/blob no banco.
+Troca de senha, logout/invalidação explícita, roles, soft delete, rascunhos, slug, threads de reply, like em reply, tags, provedor de e-mail externo (SES/SendGrid), armazenamento de imagem em S3/blob no banco. Expiração, reembolso ou desmarcar premium. `premium` no autor público, no register, no login ou no avatar.

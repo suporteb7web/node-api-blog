@@ -5,6 +5,7 @@ import { createApp } from '../../src/app.js';
 import { db } from '../../src/db/index.js';
 import { posts } from '../../src/db/schema.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
+import { markUserPremium } from '../helpers/premium.js';
 
 describe('POST /api/posts', () => {
   const app = createApp();
@@ -44,6 +45,7 @@ describe('POST /api/posts', () => {
       title: 'Hello World',
       content: 'First post content',
       image: null,
+      premium: false,
       createdAt: expect.any(String),
       author: {
         id: user.id,
@@ -61,6 +63,7 @@ describe('POST /api/posts', () => {
     expect(stored?.title).toBe('Hello World');
     expect(stored?.content).toBe('First post content');
     expect(stored?.authorId).toBe(user.id);
+    expect(stored?.premium).toBe(false);
   });
 
   it('returns 400 VALIDATION_ERROR for invalid body', async () => {
@@ -196,5 +199,90 @@ describe('POST /api/posts', () => {
 
     expect(whitespaceBearer.status).toBe(401);
     expect(whitespaceBearer.body.error.code).toBe('UNAUTHORIZED');
+  });
+
+  it('returns 403 FORBIDDEN when a non-premium user marks the post as premium and stores nothing', async () => {
+    const { token } = await registerUser();
+
+    const response = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'Secret',
+        content: 'Hidden',
+        premium: true,
+      });
+
+    expect(response.status).toBe(403);
+    expect(response.body.error).toEqual({
+      code: 'FORBIDDEN',
+      message: 'Only premium users can mark posts as premium',
+    });
+
+    const stored = await db.query.posts.findMany();
+    expect(stored).toHaveLength(0);
+  });
+
+  it('creates a premium post for a premium user', async () => {
+    const { token, user } = await registerUser();
+    await markUserPremium(user.id);
+
+    const response = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'Secret',
+        content: 'Hidden',
+        premium: true,
+      });
+
+    expect(response.status).toBe(201);
+    expect(response.body.premium).toBe(true);
+    expect(response.body.author).toEqual({ id: user.id, name: 'Alice' });
+
+    const stored = await db.query.posts.findFirst({
+      where: eq(posts.id, response.body.id),
+    });
+
+    expect(stored?.premium).toBe(true);
+  });
+
+  it('keeps premium false when a premium user omits the flag or sends false', async () => {
+    const { token, user } = await registerUser();
+    await markUserPremium(user.id);
+
+    const omitted = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ title: 'Public', content: 'Visible' });
+
+    const explicit = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ title: 'Also public', content: 'Visible', premium: false });
+
+    expect(omitted.status).toBe(201);
+    expect(omitted.body.premium).toBe(false);
+    expect(explicit.status).toBe(201);
+    expect(explicit.body.premium).toBe(false);
+  });
+
+  it('returns 400 VALIDATION_ERROR when premium is not a boolean', async () => {
+    const { token } = await registerUser();
+
+    const response = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'Hello',
+        content: 'World',
+        premium: 'true',
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+
+    const stored = await db.query.posts.findMany();
+    expect(stored).toHaveLength(0);
   });
 });

@@ -1,8 +1,9 @@
-import { count, desc, eq } from 'drizzle-orm';
+import { count, desc, eq, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { posts, users } from '../db/schema.js';
 import type {
   CreatePostData,
+  ListPostsOptions,
   ListWithAuthorResult,
   PostRecord,
   PostsRepository,
@@ -10,9 +11,19 @@ import type {
   UpdatePostData,
 } from './posts.repository.js';
 
+function visiblePosts(includePremium: boolean): SQL {
+  return or(eq(posts.premium, false), sql`${includePremium}`) ?? sql`true`;
+}
+
 export class DrizzlePostsRepository implements PostsRepository {
-  async listWithAuthor(page: number, limit: number): Promise<ListWithAuthorResult> {
+  async listWithAuthor(
+    page: number,
+    limit: number,
+    options: ListPostsOptions,
+  ): Promise<ListWithAuthorResult> {
     const offset = (page - 1) * limit;
+    const visible = visiblePosts(options.includePremium);
+    const visibleCount = visiblePosts(options.includePremium);
 
     const [rows, [{ total }]] = await Promise.all([
       db
@@ -22,15 +33,17 @@ export class DrizzlePostsRepository implements PostsRepository {
           content: posts.content,
           createdAt: posts.createdAt,
           photoPath: posts.photoPath,
+          premium: posts.premium,
           authorId: users.id,
           authorName: users.name,
         })
         .from(posts)
         .innerJoin(users, eq(posts.authorId, users.id))
+        .where(visible)
         .orderBy(desc(posts.createdAt))
         .limit(limit)
         .offset(offset),
-      db.select({ total: count() }).from(posts),
+      db.select({ total: count() }).from(posts).where(visibleCount),
     ]);
 
     return { rows, total };
@@ -44,6 +57,7 @@ export class DrizzlePostsRepository implements PostsRepository {
         content: posts.content,
         createdAt: posts.createdAt,
         photoPath: posts.photoPath,
+        premium: posts.premium,
         authorId: users.id,
         authorName: users.name,
       })
@@ -62,6 +76,7 @@ export class DrizzlePostsRepository implements PostsRepository {
         title: data.title,
         content: data.content,
         authorId: data.authorId,
+        premium: data.premium,
       })
       .returning({
         id: posts.id,
@@ -69,6 +84,7 @@ export class DrizzlePostsRepository implements PostsRepository {
         content: posts.content,
         createdAt: posts.createdAt,
         photoPath: posts.photoPath,
+        premium: posts.premium,
       });
 
     return post;
@@ -88,6 +104,7 @@ export class DrizzlePostsRepository implements PostsRepository {
       .set({
         ...(data.title !== undefined ? { title: data.title } : {}),
         ...(data.content !== undefined ? { content: data.content } : {}),
+        ...(data.premium !== undefined ? { premium: data.premium } : {}),
       })
       .where(eq(posts.id, postId))
       .returning({
@@ -96,6 +113,7 @@ export class DrizzlePostsRepository implements PostsRepository {
         content: posts.content,
         createdAt: posts.createdAt,
         photoPath: posts.photoPath,
+        premium: posts.premium,
       });
 
     return post;

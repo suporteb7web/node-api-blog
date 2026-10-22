@@ -3,6 +3,7 @@ import request from 'supertest';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
+import { markUserPremium } from '../helpers/premium.js';
 
 function sessionIdFromCheckoutUrl(url: string): string {
   const sessionId = new URL(url).pathname.split('/').find((part) => /^cs_(test|live)_/.test(part));
@@ -74,5 +75,20 @@ describe('POST /api/me/checkout', () => {
 
     expect(response.status).toBe(401);
     expect(response.body.error.code).toBe('UNAUTHORIZED');
+  });
+
+  it('returns 409 CONFLICT when the user is already premium', async () => {
+    const { token, user } = await registerUser();
+    await markUserPremium(user.id);
+
+    const response = await request(app)
+      .post('/api/me/checkout')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toEqual({
+      code: 'CONFLICT',
+      message: 'User is already premium',
+    });
   });
 });

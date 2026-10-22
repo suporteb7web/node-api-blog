@@ -3,6 +3,7 @@ export type UserPublic = {
   name: string;
   email: string;
   avatarPath: string | null;
+  premium: boolean;
 };
 
 export type UserRecord = UserPublic & {
@@ -23,4 +24,5 @@ export interface UsersRepository {
   create(data: CreateUserData): Promise<UserPublic>;
   updateToken(userId: number, token: string): Promise<void>;
   updateAvatarPath(userId: number, avatarPath: string): Promise<void>;
+  markPremium(userId: number): Promise<void>;
 }

@@ -1,11 +1,12 @@
-import { AppError } from '../../errors/app-error.js';
 import type { LikesRepository } from '../../repositories/likes.repository.js';
 import type { PostsRepository } from '../../repositories/posts.repository.js';
 import type { RepliesRepository } from '../../repositories/replies.repository.js';
+import { assertPostVisible } from './assert-post-visible.js';
 
 type GetPostInput = {
   postId: number;
   userId?: number;
+  viewerIsPremium: boolean;
 };
 
 export class GetPostUseCase {
@@ -15,12 +16,9 @@ export class GetPostUseCase {
     private readonly repliesRepository: RepliesRepository,
   ) {}
 
-  async execute({ postId, userId }: GetPostInput) {
+  async execute({ postId, userId, viewerIsPremium }: GetPostInput) {
     const row = await this.postsRepository.findWithAuthorById(postId);
-
-    if (!row) {
-      throw new AppError(404, 'NOT_FOUND', 'Post not found');
-    }
+    assertPostVisible(row, viewerIsPremium);
 
     const [likesCount, likedByMe, replies] = await Promise.all([
       this.likesRepository.countByPostId(postId),

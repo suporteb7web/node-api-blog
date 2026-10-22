@@ -3,8 +3,9 @@ import request from 'supertest';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app.js';
 import { db } from '../../src/db/index.js';
-import { replies } from '../../src/db/schema.js';
+import { replies, users } from '../../src/db/schema.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
+import { markUserPremium } from '../helpers/premium.js';
 
 describe('DELETE /api/posts/:id/replies/:replyId', () => {
   const app = createApp();
@@ -221,5 +222,76 @@ describe('DELETE /api/posts/:id/replies/:replyId', () => {
     });
 
     expect(stored).toBeDefined();
+  });
+
+  it('returns Post not found when a non-premium user deletes a reply on a premium post, even if the reply id is wrong', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    await markUserPremium(alice.user.id);
+    await markUserPremium(bob.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const reply = await request(app)
+      .post(`/api/posts/${created.body.id}/replies`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({ content: 'Hello' });
+
+    await db.update(users).set({ premium: false }).where(eq(users.id, bob.user.id));
+
+    const wrongReply = await request(app)
+      .delete(`/api/posts/${created.body.id}/replies/99999`)
+      .set('Authorization', `Bearer ${bob.token}`);
+
+    const ownReply = await request(app)
+      .delete(`/api/posts/${created.body.id}/replies/${reply.body.id}`)
+      .set('Authorization', `Bearer ${bob.token}`);
+
+    expect(wrongReply.status).toBe(404);
+    expect(wrongReply.body.error).toEqual({
+      code: 'NOT_FOUND',
+      message: 'Post not found',
+    });
+
+    expect(ownReply.status).toBe(404);
+    expect(ownReply.body.error).toEqual({
+      code: 'NOT_FOUND',
+      message: 'Post not found',
+    });
+
+    const stored = await db.query.replies.findFirst({
+      where: eq(replies.id, reply.body.id),
+    });
+    expect(stored).toBeDefined();
+  });
+
+  it('returns 403 FORBIDDEN when a premium user deletes another author reply on a premium post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    await markUserPremium(alice.user.id);
+    await markUserPremium(bob.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const reply = await request(app)
+      .post(`/api/posts/${created.body.id}/replies`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({ content: 'Hello' });
+
+    const response = await request(app)
+      .delete(`/api/posts/${created.body.id}/replies/${reply.body.id}`)
+      .set('Authorization', `Bearer ${alice.token}`);
+
+    expect(response.status).toBe(403);
+    expect(response.body.error).toEqual({
+      code: 'FORBIDDEN',
+      message: 'You can only delete your own replies',
+    });
   });
 });

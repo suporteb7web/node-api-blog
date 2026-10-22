@@ -1,7 +1,7 @@
-import { AppError } from '../../errors/app-error.js';
 import type { LikesRepository } from '../../repositories/likes.repository.js';
 import type { PostsRepository } from '../../repositories/posts.repository.js';
 import type { AuthUser } from '../../types/auth.js';
+import { assertPostVisible } from '../posts/assert-post-visible.js';
 
 type LikePostInput = {
   user: AuthUser;
@@ -16,7 +16,7 @@ export class LikePostUseCase {
 
   async execute({ user, postId }: LikePostInput): Promise<void> {
     const existing = await this.postsRepository.findById(postId);
-    if (!existing) throw new AppError(404, 'NOT_FOUND', 'Post not found');
+    assertPostVisible(existing, user.premium);
 
     await this.likesRepository.like(user.id, postId);
   }

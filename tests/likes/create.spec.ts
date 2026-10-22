@@ -5,6 +5,7 @@ import { createApp } from '../../src/app.js';
 import { db } from '../../src/db/index.js';
 import { likes } from '../../src/db/schema.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
+import { markUserPremium } from '../helpers/premium.js';
 
 describe('POST /api/posts/:id/likes', () => {
   const app = createApp();
@@ -155,5 +156,56 @@ describe('POST /api/posts/:id/likes', () => {
       code: 'NOT_FOUND',
       message: 'Post not found',
     });
+  });
+
+  it('returns 404 NOT_FOUND when a non-premium user likes a premium post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    await markUserPremium(alice.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const missingToken = await request(app).post(`/api/posts/${created.body.id}/likes`);
+    const response = await request(app)
+      .post(`/api/posts/${created.body.id}/likes`)
+      .set('Authorization', `Bearer ${bob.token}`);
+
+    expect(missingToken.status).toBe(401);
+    expect(missingToken.body.error.code).toBe('UNAUTHORIZED');
+
+    expect(response.status).toBe(404);
+    expect(response.body.error).toEqual({
+      code: 'NOT_FOUND',
+      message: 'Post not found',
+    });
+
+    const stored = await db.query.likes.findMany();
+    expect(stored).toHaveLength(0);
+  });
+
+  it('lets a premium user like another author premium post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    await markUserPremium(alice.user.id);
+    await markUserPremium(bob.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const response = await request(app)
+      .post(`/api/posts/${created.body.id}/likes`)
+      .set('Authorization', `Bearer ${bob.token}`);
+
+    expect(response.status).toBe(204);
+
+    const stored = await db.query.likes.findFirst({
+      where: and(eq(likes.userId, bob.user.id), eq(likes.postId, created.body.id)),
+    });
+    expect(stored).toBeDefined();
   });
 });

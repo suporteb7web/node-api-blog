@@ -14,7 +14,7 @@ import { uploadImage } from '../middlewares/upload.js';
 
 export const postsRouter = Router();
 
-postsRouter.get('/api/posts', listPostsController);
+postsRouter.get('/api/posts', optionalAuth, listPostsController);
 postsRouter.get('/api/posts/:id', optionalAuth, getPostController);
 postsRouter.post('/api/posts', requireAuth, createPostController);
 postsRouter.put('/api/posts/:id/image', requireAuth, uploadImage, updatePostImageController);

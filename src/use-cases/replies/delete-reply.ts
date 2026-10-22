@@ -2,6 +2,7 @@ import { AppError } from '../../errors/app-error.js';
 import type { PostsRepository } from '../../repositories/posts.repository.js';
 import type { RepliesRepository } from '../../repositories/replies.repository.js';
 import type { AuthUser } from '../../types/auth.js';
+import { assertPostVisible } from '../posts/assert-post-visible.js';
 
 type DeleteReplyInput = {
   author: AuthUser;
@@ -17,7 +18,7 @@ export class DeleteReplyUseCase {
 
   async execute({ author, postId, replyId }: DeleteReplyInput) {
     const post = await this.postsRepository.findById(postId);
-    if (!post) throw new AppError(404, 'NOT_FOUND', 'Post not found');
+    assertPostVisible(post, author.premium);
 
     const reply = await this.repliesRepository.findById(replyId);
     if (!reply || reply.postId !== postId) {

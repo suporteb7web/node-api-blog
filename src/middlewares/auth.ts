@@ -22,6 +22,7 @@ async function authenticateBearer(header: string): Promise<AuthUser> {
       id: true,
       name: true,
       email: true,
+      premium: true,
     },
   });
 

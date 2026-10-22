@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const createPostBodySchema = z.object({
   title: z.string().trim().min(1).max(200),
   content: z.string().trim().min(1),
+  premium: z.boolean().optional(),
 });
 
 export const postIdParamsSchema = z.object({
@@ -17,11 +18,15 @@ export const updatePostBodySchema = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
     content: z.string().trim().min(1).optional(),
+    premium: z.boolean().optional(),
   })
   .strict()
-  .refine((data) => data.title !== undefined || data.content !== undefined, {
-    message: 'At least one of title or content must be provided',
-  });
+  .refine(
+    (data) => data.title !== undefined || data.content !== undefined || data.premium !== undefined,
+    {
+      message: 'At least one of title, content or premium must be provided',
+    },
+  );
 
 export type CreatePostBody = z.infer<typeof createPostBodySchema>;
 export type PostIdParams = z.infer<typeof postIdParamsSchema>;

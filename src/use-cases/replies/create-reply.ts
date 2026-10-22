@@ -1,10 +1,10 @@
-import { AppError } from '../../errors/app-error.js';
 import type { PostsRepository } from '../../repositories/posts.repository.js';
 import type { RepliesRepository } from '../../repositories/replies.repository.js';
 import type { ReplyNotificationJobsRepository } from '../../repositories/reply-notification-jobs.repository.js';
 import type { UsersRepository } from '../../repositories/users.repository.js';
 import type { CreateReplyBody } from '../../schemas/replies.schemas.js';
 import type { AuthUser } from '../../types/auth.js';
+import { assertPostVisible } from '../posts/assert-post-visible.js';
 
 type CreateReplyInput = {
   author: AuthUser;
@@ -22,7 +22,7 @@ export class CreateReplyUseCase {
 
   async execute({ author, postId, data }: CreateReplyInput) {
     const existing = await this.postsRepository.findById(postId);
-    if (!existing) throw new AppError(404, 'NOT_FOUND', 'Post not found');
+    assertPostVisible(existing, author.premium);
 
     const reply = await this.repliesRepository.create({
       content: data.content,

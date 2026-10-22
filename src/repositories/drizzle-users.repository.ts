@@ -13,6 +13,7 @@ const publicColumns = {
   name: users.name,
   email: users.email,
   avatarPath: users.avatarPath,
+  premium: users.premium,
 } as const;
 
 export class DrizzleUsersRepository implements UsersRepository {
@@ -32,6 +33,7 @@ export class DrizzleUsersRepository implements UsersRepository {
         name: true,
         email: true,
         avatarPath: true,
+        premium: true,
       },
     });
 
@@ -58,5 +60,9 @@ export class DrizzleUsersRepository implements UsersRepository {
 
   async updateAvatarPath(userId: number, avatarPath: string): Promise<void> {
     await db.update(users).set({ avatarPath }).where(eq(users.id, userId));
+  }
+
+  async markPremium(userId: number): Promise<void> {
+    await db.update(users).set({ premium: true }).where(eq(users.id, userId));
   }
 }

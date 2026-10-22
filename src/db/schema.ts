@@ -1,4 +1,4 @@
-import { integer, pgTable, primaryKey, serial, text, timestamp, varchar } from 'drizzle-orm/pg-core';
+import { boolean, integer, pgTable, primaryKey, serial, text, timestamp, varchar } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
@@ -7,6 +7,7 @@ export const users = pgTable('users', {
   password: text('password').notNull(),
   token: text('token'),
   avatarPath: text('avatar_path'),
+  premium: boolean('premium').notNull().default(false),
 });
 
 export const posts = pgTable('posts', {
@@ -18,6 +19,7 @@ export const posts = pgTable('posts', {
     .notNull()
     .references(() => users.id),
   photoPath: text('photo_path'),
+  premium: boolean('premium').notNull().default(false),
 });
 
 export const likes = pgTable(

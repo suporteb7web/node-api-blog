@@ -11,22 +11,22 @@ API de blog com autenticação de usuários, gestão de posts, likes, replies, m
 - Cadastro e login geram um **token de sessão** persistido no banco e retornado ao cliente.
 - Rotas protegidas exigem `Authorization: Bearer <token>`.
 - Usuários autenticados podem criar, editar e excluir **apenas os próprios posts**.
-- Listagem e consulta individual de posts são **públicas**. A consulta por id aceita token **opcional** para preencher `likedByMe`.
+- Listagem e consulta individual de posts são **públicas** para posts não premium. As duas aceitam token **opcional**. Na consulta por id, o token preenche `likedByMe`. Na listagem e na consulta, token inválido é **401**; usuário premium vê também os posts premium.
 - Usuário autenticado pode curtir/descurtir um post (incluindo o próprio) e responder um post.
 - Só o **autor da reply** pode apagá-la (o autor do post não apaga reply de outra pessoa).
 - Usuário autenticado consulta os próprios dados em `GET /api/me` e atualiza o **avatar** em `PUT /api/me/avatar`.
-- Usuário autenticado inicia a compra de acesso premium em `POST /api/me/checkout`: o endpoint cria uma Checkout Session de pagamento único no Stripe e devolve somente a URL. Não concede o acesso nem altera o usuário ou os posts.
-- O Stripe notifica `POST /api/webhook/stripe` no evento `checkout.session.completed`. O endpoint verifica a assinatura com `STRIPE_WEBHOOK_SECRET` e lê `client_reference_id`. Não persiste nada e não concede o acesso.
+- Usuário autenticado inicia a compra de acesso premium em `POST /api/me/checkout`: o endpoint cria uma Checkout Session de pagamento único no Stripe e devolve somente a URL. Não concede o acesso. Se o usuário já é premium, responde **409** e não cria a sessão.
+- O Stripe notifica `POST /api/webhook/stripe` no evento `checkout.session.completed`. O endpoint verifica a assinatura com `STRIPE_WEBHOOK_SECRET`, lê `client_reference_id` e, quando o id corresponde a um usuário, marca `users.premium` como `true`. O acesso não expira. Reenvio do evento mantém `true`. Id desconhecido não altera nada. Voltar da `success_url` não concede o acesso.
 - O autor do post atualiza a **imagem** do post em `PUT /api/posts/:id/image` (arquivo em disco, path no banco).
 - Nova reply em um post **de outra pessoa** dispara e-mail ao autor do post. Responder o próprio post **não** gera e-mail.
-- Escopo limitado a **auth + posts + likes + replies + mídia + e-mail de reply + checkout Stripe de acesso premium + webhook `checkout.session.completed`** (sem perfil completo, logout, papéis de admin, soft delete, threads, like em reply, concessão de acesso após o pagamento, etc.).
+- Escopo limitado a **auth + posts + likes + replies + mídia + e-mail de reply + checkout Stripe de acesso premium + webhook que marca o usuário como premium** (sem perfil completo, logout, papéis de admin, soft delete, threads, like em reply, expiração ou reembolso de premium, etc.).
 
 ### Relacionamentos
 
 | Recurso | Campos principais | Observações |
 |--------|-------------------|-------------|
-| `users` | `id`, `name`, `email`, `password` (hash), `token` (sessão), `avatarPath` | `email` único; `avatarPath` é o path relativo do arquivo em disco (nullable) |
-| `posts` | `id`, `title`, `content`, `createdAt`, `authorId`, `photoPath` | Relação 1:N com `users`; `photoPath` é o path relativo do arquivo em disco (nullable) |
+| `users` | `id`, `name`, `email`, `password` (hash), `token` (sessão), `avatarPath`, `premium` | `email` único; `avatarPath` é o path relativo do arquivo em disco (nullable); `premium` boolean, default `false` |
+| `posts` | `id`, `title`, `content`, `createdAt`, `authorId`, `photoPath`, `premium` | Relação 1:N com `users`; `photoPath` é o path relativo do arquivo em disco (nullable); `premium` boolean, default `false` |
 | `likes` | `userId`, `postId` | Um like por par usuário+post; o autor do post **pode** curtir o próprio post |
 | `replies` | `id`, `content`, `createdAt`, `authorId`, `postId` | Relação 1:N com `posts` e com `users`; sem thread (reply só no post) |
 
@@ -130,7 +130,7 @@ Todas as respostas de erro usam o mesmo envelope:
 |------|--------|--------|
 | 400 | `VALIDATION_ERROR` | Body/params/query inválidos (Zod) |
 | 401 | `UNAUTHORIZED` | Token ausente, inválido ou credenciais incorretas no login |
-| 403 | `FORBIDDEN` | Autenticado, mas sem permissão (ex.: editar/excluir post de outro autor; atualizar imagem de post de outro autor; apagar reply de outro autor) |
+| 403 | `FORBIDDEN` | Autenticado, mas sem permissão (ex.: editar/excluir post de outro autor; atualizar imagem de post de outro autor; apagar reply de outro autor; usuário não premium marcando post como premium) |
 | 404 | `NOT_FOUND` | Recurso não encontrado |
 | 409 | `CONFLICT` | Violação de unicidade (ex.: e-mail já cadastrado) |
 | 500 | `INTERNAL_ERROR` | Erro inesperado |
@@ -165,7 +165,7 @@ Todas as respostas de erro usam o mesmo envelope:
 | `GET /api/posts/:id` | sim | sim | sim (array completo, sem paginação, `createdAt` asc) |
 | `POST /api/posts` / `PUT /api/posts/:id` / `PUT /api/posts/:id/image` | não | não | não |
 
-`image` (path público da foto do post, ou `null`) entra em **todas** as respostas de post acima. `PUT /api/posts/:id` não altera a imagem — só título e/ou conteúdo.
+`image` (path público da foto do post, ou `null`) e `premium` (boolean) entram em **todas** as respostas de post acima. O objeto `author` continua `{ id, name }`, sem `premium`. `PUT /api/posts/:id` não altera a imagem — só título, conteúdo e/ou `premium`.
 
 ### 4.10 Upload de imagem
 
@@ -333,11 +333,13 @@ Nenhum (`body`, `params` e `query` vazios).
   "id": 1,
   "name": "string",
   "email": "string",
-  "avatar": null
+  "avatar": null,
+  "premium": false
 }
 ```
 
 - `avatar` é o path público (ex.: `"/uploads/avatars/..."`) ou `null` quando o usuário ainda não enviou avatar.
+- `premium` é `true` depois que o webhook de pagamento concluído marcou o usuário. Não entra em register, login nem em `PUT /api/me/avatar`.
 
 **401** — `UNAUTHORIZED` — token ausente/inválido
 
@@ -379,11 +381,13 @@ Atualiza o avatar do usuário autenticado. O campo de arquivo é `image`. Substi
 
 ### 5.5 `GET /api/posts`
 
-Listagem pública de posts em ordem cronológica inversa (`createdAt` desc). Inclui o nome do autor (não o e-mail), `likesCount` e `image`. **Não** inclui `likedByMe` nem o array `replies`.
+Listagem de posts em ordem cronológica inversa (`createdAt` desc). Inclui o nome do autor (não o e-mail), `likesCount`, `image` e `premium`. **Não** inclui `likedByMe` nem o array `replies`.
+
+Sem token, ou com token válido de usuário não premium, a lista traz só posts com `premium: false`. Com token válido de usuário premium, a mesma lista mistura posts premium e não premium, na mesma ordem. `meta.total` e `meta.totalPages` contam só os posts visíveis naquele pedido.
 
 | | |
 |--|--|
-| **Authorization** | Não |
+| **Authorization** | Opcional — `Bearer <token>` |
 
 #### Input — `query`
 
@@ -403,6 +407,7 @@ Listagem pública de posts em ordem cronológica inversa (`createdAt` desc). Inc
       "title": "string",
       "content": "string",
       "image": null,
+      "premium": false,
       "createdAt": "2026-08-07T21:00:00.000Z",
       "likesCount": 0,
       "author": {
@@ -423,14 +428,19 @@ Listagem pública de posts em ordem cronológica inversa (`createdAt` desc). Inc
 - Página sem resultados retorna `data: []` com `meta` coerente (não é 404).
 - `likesCount` é `0` quando o post não tem likes.
 - `image` é o path público da foto (ex.: `"/uploads/posts/..."`) ou `null` quando o post não tem imagem.
+- `premium` é `true` quando o post foi marcado como premium.
 
 **400** — `VALIDATION_ERROR` — `page` inválida (ex.: `0`, negativo, não numérico)
+
+**401** — `UNAUTHORIZED` — header `Authorization` presente, mas token malformado ou inválido
 
 ---
 
 ### 5.6 `GET /api/posts/:id`
 
-Consulta pública de um post por id, com nome do autor, `likesCount`, `likedByMe` e o array completo de `replies` (sem paginação), ordenado por `createdAt` **asc**.
+Consulta de um post por id, com nome do autor, `likesCount`, `likedByMe`, `premium` e o array completo de `replies` (sem paginação), ordenado por `createdAt` **asc**.
+
+Post premium é **404** `NOT_FOUND` (`"Post not found"`) para quem não envia token e para token válido de usuário não premium. Post inexistente usa o mesmo erro. Token inválido continua **401**, resolvido antes de olhar o post.
 
 | | |
 |--|--|
@@ -454,6 +464,7 @@ Se o header `Authorization` estiver presente, deve ser um Bearer válido; caso c
   "title": "string",
   "content": "string",
   "image": null,
+  "premium": false,
   "createdAt": "2026-08-07T21:00:00.000Z",
   "likesCount": 0,
   "likedByMe": false,
@@ -512,6 +523,7 @@ Cria um post para o usuário autenticado. `createdAt` é definido no momento da 
 |-------|------|-------------|--------------|
 | `title` | `string` | Sim | Não vazio; trim; comprimento 1–200 |
 | `content` | `string` | Sim | Não vazio; trim; comprimento ≥ 1 |
+| `premium` | `boolean` | Não | Ausente → `false`. `true` só se o autor for premium |
 
 #### Respostas
 
@@ -523,6 +535,7 @@ Cria um post para o usuário autenticado. `createdAt` é definido no momento da 
   "title": "string",
   "content": "string",
   "image": null,
+  "premium": false,
   "createdAt": "2026-08-07T21:00:00.000Z",
   "author": {
     "id": 1,
@@ -531,15 +544,30 @@ Cria um post para o usuário autenticado. `createdAt` é definido no momento da 
 }
 ```
 
-**400** — `VALIDATION_ERROR`
+**400** — `VALIDATION_ERROR` — inclusive `premium` com tipo inválido
 
 **401** — `UNAUTHORIZED` — token ausente/inválido
+
+**403** — `FORBIDDEN` — usuário autenticado não premium enviou `premium: true`. Nada é gravado.
+
+```json
+{
+  "error": {
+    "code": "FORBIDDEN",
+    "message": "Only premium users can mark posts as premium"
+  }
+}
+```
 
 ---
 
 ### 5.8 `PUT /api/posts/:id`
 
-Atualização **parcial** do próprio post. Pode enviar só `title`, só `content`, ou ambos. Pelo menos um campo deve estar presente. Não altera a imagem do post (use `PUT /api/posts/:id/image`).
+Atualização **parcial** do próprio post. Pode enviar só `title`, só `content`, só `premium`, ou qualquer combinação. Pelo menos um desses campos deve estar presente. Não altera a imagem do post (use `PUT /api/posts/:id/image`).
+
+`premium` ausente não muda a marca. `premium: false` pode ser enviado por qualquer autor no próprio post. `premium: true` só pelo autor que já é premium; caso contrário **403** e nada é gravado (nem os outros campos do body).
+
+Ordem quando o post existe e o caller é premium, ou quando o post não é premium: post inexistente ou premium visto por quem não é premium → **404**; post de outro autor → **403** de ownership; autor não premium enviando `premium: true` → **403** da marca.
 
 | | |
 |--|--|
@@ -558,8 +586,9 @@ Atualização **parcial** do próprio post. Pode enviar só `title`, só `conten
 |-------|------|-------------|--------------|
 | `title` | `string` | Não* | Se presente: não vazio; trim; 1–200 |
 | `content` | `string` | Não* | Se presente: não vazio; trim; ≥ 1 |
+| `premium` | `boolean` | Não* | Se presente: boolean. Ausente não altera a marca |
 
-\* Objeto deve ter **pelo menos um** de `title` ou `content`. Campos extras devem ser rejeitados (schema estrito / `.strict()`).
+\* Objeto deve ter **pelo menos um** de `title`, `content` ou `premium`. Campos extras devem ser rejeitados (schema estrito / `.strict()`).
 
 #### Respostas
 
@@ -571,6 +600,7 @@ Atualização **parcial** do próprio post. Pode enviar só `title`, só `conten
   "title": "string",
   "content": "string",
   "image": null,
+  "premium": false,
   "createdAt": "2026-08-07T21:00:00.000Z",
   "author": {
     "id": 1,
@@ -579,7 +609,7 @@ Atualização **parcial** do próprio post. Pode enviar só `title`, só `conten
 }
 ```
 
-**400** — `VALIDATION_ERROR` — params/body inválidos ou body vazio
+**400** — `VALIDATION_ERROR` — params/body inválidos, body vazio ou `premium` com tipo inválido
 
 **401** — `UNAUTHORIZED`
 
@@ -594,7 +624,18 @@ Atualização **parcial** do próprio post. Pode enviar só `title`, só `conten
 }
 ```
 
-**404** — `NOT_FOUND` — post inexistente
+**403** — `FORBIDDEN` — autor não premium enviou `premium: true`
+
+```json
+{
+  "error": {
+    "code": "FORBIDDEN",
+    "message": "Only premium users can mark posts as premium"
+  }
+}
+```
+
+**404** — `NOT_FOUND` — post inexistente, ou post premium visto por usuário que não é premium (`"Post not found"`)
 
 ---
 
@@ -602,7 +643,7 @@ Atualização **parcial** do próprio post. Pode enviar só `title`, só `conten
 
 Atualiza a imagem do **próprio** post. O arquivo é obrigatório e deve ser uma imagem válida. Substitui a imagem anterior, se houver. Não altera `title` nem `content`.
 
-Confirmar que o post existe antes de checar ownership: post inexistente → **404**; post existe, mas não pertence ao usuário autenticado → **403**.
+Confirmar visibilidade antes de ownership: post inexistente ou premium visto por quem não é premium → **404**; post visível de outro autor → **403**.
 
 | | |
 |--|--|
@@ -631,6 +672,7 @@ Confirmar que o post existe antes de checar ownership: post inexistente → **40
   "title": "string",
   "content": "string",
   "image": "/uploads/posts/...",
+  "premium": false,
   "createdAt": "2026-08-07T21:00:00.000Z",
   "author": {
     "id": 1,
@@ -654,7 +696,7 @@ Confirmar que o post existe antes de checar ownership: post inexistente → **40
 }
 ```
 
-**404** — `NOT_FOUND` — post inexistente
+**404** — `NOT_FOUND` — post inexistente, ou post premium visto por usuário que não é premium (`"Post not found"`)
 
 ---
 
@@ -695,7 +737,7 @@ Nenhum.
 }
 ```
 
-**404** — `NOT_FOUND` — post inexistente
+**404** — `NOT_FOUND` — post inexistente, ou post premium visto por usuário que não é premium (`"Post not found"`)
 
 ---
 
@@ -725,7 +767,7 @@ Nenhum.
 
 **401** — `UNAUTHORIZED`
 
-**404** — `NOT_FOUND` — post inexistente
+**404** — `NOT_FOUND` — post inexistente, ou post premium visto por usuário que não é premium
 
 ```json
 {
@@ -735,6 +777,8 @@ Nenhum.
   }
 }
 ```
+
+O **401** de token ausente ou inválido é resolvido antes de olhar o post.
 
 ---
 
@@ -764,7 +808,7 @@ Nenhum.
 
 **401** — `UNAUTHORIZED`
 
-**404** — `NOT_FOUND` — post inexistente
+**404** — `NOT_FOUND` — post inexistente, ou post premium visto por usuário que não é premium (`"Post not found"`)
 
 ---
 
@@ -813,7 +857,7 @@ Campos extras devem ser rejeitados (schema estrito / `.strict()`).
 
 **401** — `UNAUTHORIZED`
 
-**404** — `NOT_FOUND` — post inexistente
+**404** — `NOT_FOUND` — post inexistente, ou post premium visto por usuário que não é premium (`"Post not found"`)
 
 ---
 
@@ -821,7 +865,7 @@ Campos extras devem ser rejeitados (schema estrito / `.strict()`).
 
 Hard delete da **própria** reply. O autor do post **não** pode apagar reply de outra pessoa. Sem body.
 
-Confirmar que o post existe e que a reply existe **naquele** post antes de checar ownership: post ou reply inexistente (ou reply de outro post) → **404**; reply existe no post mas não pertence ao usuário autenticado → **403**.
+Para quem não é premium, post premium e post inexistente são o mesmo **404** `"Post not found"`, também quando o id da reply está errado. Nos demais casos, confirmar que o post existe e que a reply existe **naquele** post antes de checar ownership: post ou reply inexistente (ou reply de outro post) → **404**; reply existe no post mas não pertence ao usuário autenticado → **403**.
 
 | | |
 |--|--|
@@ -857,13 +901,13 @@ Nenhum.
 }
 ```
 
-**404** — `NOT_FOUND` — post inexistente, ou reply inexistente naquele post
+**404** — `NOT_FOUND` — post inexistente ou premium visto por quem não é premium (`"Post not found"`); reply inexistente naquele post (`"Reply not found"`) nos demais casos
 
 ---
 
 ### 5.15 `POST /api/me/checkout`
 
-Cria uma Checkout Session de pagamento único no Stripe para o usuário autenticado e devolve somente a URL hospedada. Não persiste dados e não altera o usuário nem os posts.
+Cria uma Checkout Session de pagamento único no Stripe para o usuário autenticado e devolve somente a URL hospedada. Não concede o acesso. Usuário que já é premium recebe **409** e a sessão não é criada.
 
 | | |
 |--|--|
@@ -894,6 +938,17 @@ A sessão é criada com:
 
 **401** — `UNAUTHORIZED` — token ausente ou inválido
 
+**409** — `CONFLICT` — usuário já é premium
+
+```json
+{
+  "error": {
+    "code": "CONFLICT",
+    "message": "User is already premium"
+  }
+}
+```
+
 Falha ao criar a sessão no Stripe → **500** `INTERNAL_ERROR`.
 
 ---
@@ -902,7 +957,7 @@ Falha ao criar a sessão no Stripe → **500** `INTERNAL_ERROR`.
 
 Recebe o webhook do Stripe. Não exige token de sessão: a autenticidade é o header `Stripe-Signature`, verificado com `STRIPE_WEBHOOK_SECRET` sobre o **body cru** (os bytes originais, antes de qualquer parse JSON).
 
-Observa o evento `checkout.session.completed`. Nesse evento, lê `client_reference_id` e para por aí: não persiste, não altera o usuário e não concede acesso. Evento de outro tipo, com assinatura válida, é reconhecido e ignorado.
+Observa o evento `checkout.session.completed`. Nesse evento, lê `client_reference_id`. Se o id corresponde a um usuário, `users.premium` passa a `true` (se já era `true`, permanece). Se o id não corresponde a um usuário, ou não é um id de usuário, nada muda. Evento de outro tipo, com assinatura válida, é reconhecido e ignorado. Nenhum outro evento altera `premium`.
 
 | | |
 |--|--|
@@ -957,11 +1012,11 @@ Evento `checkout.session.completed` sem `client_reference_id`:
 | `POST /api/auth/login` | ✓ | ✓ | | | |
 | `GET /api/me` | | ✓ | | | |
 | `PUT /api/me/avatar` | ✓ | ✓ | | | |
-| `POST /api/me/checkout` | | ✓ | | | |
+| `POST /api/me/checkout` | | ✓ | | | ✓ |
 | `POST /api/webhook/stripe` | ✓ | | | | |
-| `GET /api/posts` | ✓ | | | | |
+| `GET /api/posts` | ✓ | ✓ | | | |
 | `GET /api/posts/:id` | ✓ | ✓ | | ✓ | |
-| `POST /api/posts` | ✓ | ✓ | | | |
+| `POST /api/posts` | ✓ | ✓ | ✓ | | |
 | `PUT /api/posts/:id` | ✓ | ✓ | ✓ | ✓ | |
 | `PUT /api/posts/:id/image` | ✓ | ✓ | ✓ | ✓ | |
 | `DELETE /api/posts/:id` | ✓ | ✓ | ✓ | ✓ | |
@@ -987,3 +1042,4 @@ Erros **500** (`INTERNAL_ERROR`) podem ocorrer em qualquer endpoint diante de fa
 - Edição de reply.
 - Remover imagem do post ou avatar sem substituir.
 - Provedor de e-mail externo (SES/SendGrid); armazenamento de imagem em S3/blob no banco.
+- Expiração, renovação, reembolso ou desmarcar um usuário premium. Filtro de listagem por premium, feed separado ou preview de post bloqueado. `premium` no autor público, no register, no login ou no avatar. Papel de admin ou marcação manual fora do webhook. Guardar valor pago, customer ou id da sessão.

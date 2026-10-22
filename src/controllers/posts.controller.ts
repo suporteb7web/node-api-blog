@@ -32,14 +32,21 @@ const deletePost = new DeletePostUseCase(postsRepository, imageStorage);
 
 export async function listPostsController(req: Request, res: Response): Promise<void> {
   const query = validate(listPostsQuerySchema, req.query);
-  const { rows, total, page, limit } = await listPosts.execute({ page: query.page });
+  const { rows, total, page, limit } = await listPosts.execute({
+    page: query.page,
+    includePremium: req.user?.premium ?? false,
+  });
 
   res.status(200).json(toListPostsResponseDto(rows, { page, limit, total }));
 }
 
 export async function getPostController(req: Request, res: Response): Promise<void> {
   const params = validate(postIdParamsSchema, req.params);
-  const post = await getPost.execute({ postId: params.id, userId: req.user?.id });
+  const post = await getPost.execute({
+    postId: params.id,
+    userId: req.user?.id,
+    viewerIsPremium: req.user?.premium ?? false,
+  });
 
   res.status(200).json(toPostDetailDto(post, { id: post.authorId, name: post.authorName }));
 }

@@ -7,6 +7,7 @@ type PostLike = {
   content: string;
   createdAt: Date;
   photoPath?: string | null;
+  premium: boolean;
 };
 
 type ReplyWithAuthorLike = {
@@ -32,6 +33,7 @@ export type PostResponseDto = {
   title: string;
   content: string;
   image: string | null;
+  premium: boolean;
   createdAt: string;
   author: {
     id: number;
@@ -65,6 +67,7 @@ export function toPostResponseDto(post: PostLike, author: AuthorLike): PostRespo
     title: post.title,
     content: post.content,
     image: toPublicUploadPath(post.photoPath),
+    premium: post.premium,
     createdAt: post.createdAt.toISOString(),
     author: { id: author.id, name: author.name },
   };

@@ -8,6 +8,7 @@ import { db } from '../../src/db/index.js';
 import { likes, posts, replies } from '../../src/db/schema.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
 import { createTestImage } from '../helpers/images.js';
+import { markUserPremium } from '../helpers/premium.js';
 import { cleanUploads, getTestUploadsDir } from '../helpers/uploads.js';
 
 describe('DELETE /api/posts/:id', () => {
@@ -187,5 +188,94 @@ describe('DELETE /api/posts/:id', () => {
       code: 'NOT_FOUND',
       message: 'Post not found',
     });
+  });
+
+  it('returns 401 UNAUTHORIZED before revealing a premium post when the token is missing', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    await markUserPremium(alice.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const response = await request(app).delete(`/api/posts/${created.body.id}`);
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHORIZED');
+
+    const stored = await db.query.posts.findFirst({
+      where: eq(posts.id, created.body.id),
+    });
+    expect(stored).toBeDefined();
+  });
+
+  it('returns 404 NOT_FOUND when a non-premium user deletes a premium post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    await markUserPremium(alice.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const response = await request(app)
+      .delete(`/api/posts/${created.body.id}`)
+      .set('Authorization', `Bearer ${bob.token}`);
+
+    expect(response.status).toBe(404);
+    expect(response.body.error).toEqual({
+      code: 'NOT_FOUND',
+      message: 'Post not found',
+    });
+
+    const stored = await db.query.posts.findFirst({
+      where: eq(posts.id, created.body.id),
+    });
+    expect(stored).toBeDefined();
+  });
+
+  it('returns 403 FORBIDDEN when a premium user deletes another author premium post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    await markUserPremium(alice.user.id);
+    await markUserPremium(bob.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const response = await request(app)
+      .delete(`/api/posts/${created.body.id}`)
+      .set('Authorization', `Bearer ${bob.token}`);
+
+    expect(response.status).toBe(403);
+    expect(response.body.error).toEqual({
+      code: 'FORBIDDEN',
+      message: 'You can only delete your own posts',
+    });
+  });
+
+  it('lets the premium author delete their own premium post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    await markUserPremium(alice.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const response = await request(app)
+      .delete(`/api/posts/${created.body.id}`)
+      .set('Authorization', `Bearer ${alice.token}`);
+
+    expect(response.status).toBe(204);
+
+    const stored = await db.query.posts.findFirst({
+      where: eq(posts.id, created.body.id),
+    });
+    expect(stored).toBeUndefined();
   });
 });

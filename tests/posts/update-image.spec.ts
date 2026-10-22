@@ -9,6 +9,7 @@ import { db } from '../../src/db/index.js';
 import { posts } from '../../src/db/schema.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
 import { createTestImage } from '../helpers/images.js';
+import { markUserPremium } from '../helpers/premium.js';
 import { cleanUploads, getTestUploadsDir } from '../helpers/uploads.js';
 
 const UUID_FILENAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[a-z0-9]+$/i;
@@ -72,6 +73,7 @@ describe('PUT /api/posts/:id/image', () => {
       title: 'With image',
       content: 'Content',
       image: expect.stringMatching(/^\/uploads\/posts\//),
+      premium: false,
       createdAt: post.createdAt,
       author: {
         id: user.id,
@@ -413,5 +415,57 @@ describe('PUT /api/posts/:id/image', () => {
       code: 'NOT_FOUND',
       message: 'Post not found',
     });
+  });
+
+  it('returns 404 NOT_FOUND when a non-premium user replaces the image of a premium post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    await markUserPremium(alice.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const response = await request(app)
+      .put(`/api/posts/${created.body.id}/image`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .attach('image', await createTestImage(), {
+        filename: 'photo.png',
+        contentType: 'image/png',
+      });
+
+    expect(response.status).toBe(404);
+    expect(response.body.error).toEqual({
+      code: 'NOT_FOUND',
+      message: 'Post not found',
+    });
+
+    const stored = await db.query.posts.findFirst({
+      where: eq(posts.id, created.body.id),
+    });
+    expect(stored?.photoPath).toBeNull();
+  });
+
+  it('lets the premium author replace the image and keeps premium true', async () => {
+    const { token, user } = await registerUser('Alice', 'alice@example.com');
+    await markUserPremium(user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const response = await request(app)
+      .put(`/api/posts/${created.body.id}/image`)
+      .set('Authorization', `Bearer ${token}`)
+      .attach('image', await createTestImage(), {
+        filename: 'photo.png',
+        contentType: 'image/png',
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.premium).toBe(true);
+    expect(response.body.image).toEqual(expect.stringMatching(/^\/uploads\/posts\//));
   });
 });

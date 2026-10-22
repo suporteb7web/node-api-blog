@@ -3,8 +3,9 @@ import request from 'supertest';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app.js';
 import { db } from '../../src/db/index.js';
-import { likes } from '../../src/db/schema.js';
+import { likes, users } from '../../src/db/schema.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
+import { markUserPremium } from '../helpers/premium.js';
 
 describe('DELETE /api/posts/:id/likes', () => {
   const app = createApp();
@@ -203,5 +204,38 @@ describe('DELETE /api/posts/:id/likes', () => {
       code: 'NOT_FOUND',
       message: 'Post not found',
     });
+  });
+
+  it('returns 404 NOT_FOUND when a non-premium user unlikes a premium post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    await markUserPremium(alice.user.id);
+    await markUserPremium(bob.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    await request(app)
+      .post(`/api/posts/${created.body.id}/likes`)
+      .set('Authorization', `Bearer ${bob.token}`);
+
+    await db.update(users).set({ premium: false }).where(eq(users.id, bob.user.id));
+
+    const response = await request(app)
+      .delete(`/api/posts/${created.body.id}/likes`)
+      .set('Authorization', `Bearer ${bob.token}`);
+
+    expect(response.status).toBe(404);
+    expect(response.body.error).toEqual({
+      code: 'NOT_FOUND',
+      message: 'Post not found',
+    });
+
+    const stored = await db.query.likes.findFirst({
+      where: and(eq(likes.userId, bob.user.id), eq(likes.postId, created.body.id)),
+    });
+    expect(stored).toBeDefined();
   });
 });

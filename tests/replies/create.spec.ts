@@ -5,6 +5,7 @@ import { createApp } from '../../src/app.js';
 import { db } from '../../src/db/index.js';
 import { replies } from '../../src/db/schema.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
+import { markUserPremium } from '../helpers/premium.js';
 
 describe('POST /api/posts/:id/replies', () => {
   const app = createApp();
@@ -211,5 +212,56 @@ describe('POST /api/posts/:id/replies', () => {
       code: 'NOT_FOUND',
       message: 'Post not found',
     });
+  });
+
+  it('returns 404 NOT_FOUND when a non-premium user replies to a premium post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    await markUserPremium(alice.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const response = await request(app)
+      .post(`/api/posts/${created.body.id}/replies`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({ content: 'Hello' });
+
+    expect(response.status).toBe(404);
+    expect(response.body.error).toEqual({
+      code: 'NOT_FOUND',
+      message: 'Post not found',
+    });
+
+    const stored = await db.query.replies.findMany();
+    expect(stored).toHaveLength(0);
+  });
+
+  it('lets a premium user reply to another author premium post', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    await markUserPremium(alice.user.id);
+    await markUserPremium(bob.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const response = await request(app)
+      .post(`/api/posts/${created.body.id}/replies`)
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({ content: '  Nice post  ' });
+
+    expect(response.status).toBe(201);
+    expect(response.body).toEqual({
+      id: expect.any(Number),
+      content: 'Nice post',
+      createdAt: expect.any(String),
+      author: { id: bob.user.id, name: 'Bob' },
+    });
+    expect(response.body.author).not.toHaveProperty('premium');
   });
 });

@@ -5,6 +5,7 @@ export type PostRecord = {
   createdAt: Date;
   authorId: number;
   photoPath: string | null;
+  premium: boolean;
 };
 
 export type PostWithAuthorRow = {
@@ -15,17 +16,24 @@ export type PostWithAuthorRow = {
   authorId: number;
   authorName: string;
   photoPath: string | null;
+  premium: boolean;
 };
 
 export type CreatePostData = {
   title: string;
   content: string;
   authorId: number;
+  premium: boolean;
 };
 
 export type UpdatePostData = {
   title?: string;
   content?: string;
+  premium?: boolean;
+};
+
+export type ListPostsOptions = {
+  includePremium: boolean;
 };
 
 export type ListWithAuthorResult = {
@@ -34,7 +42,7 @@ export type ListWithAuthorResult = {
 };
 
 export interface PostsRepository {
-  listWithAuthor(page: number, limit: number): Promise<ListWithAuthorResult>;
+  listWithAuthor(page: number, limit: number, options: ListPostsOptions): Promise<ListWithAuthorResult>;
   findWithAuthorById(postId: number): Promise<PostWithAuthorRow | null>;
   create(data: CreatePostData): Promise<Omit<PostRecord, 'authorId'>>;
   findById(postId: number): Promise<PostRecord | null>;

@@ -2,6 +2,7 @@ import request from 'supertest';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app.js';
 import { cleanDatabase, closeDatabase } from '../helpers/database.js';
+import { markUserPremium } from '../helpers/premium.js';
 
 describe('GET /api/posts/:id', () => {
   const app = createApp();
@@ -51,6 +52,7 @@ describe('GET /api/posts/:id', () => {
       title: 'Public post',
       content: 'Public content',
       image: null,
+      premium: false,
       createdAt: post.createdAt,
       likesCount: 0,
       likedByMe: false,
@@ -244,5 +246,47 @@ describe('GET /api/posts/:id', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.error).toBeUndefined();
+  });
+
+  it('hides a premium post from anonymous and non-premium readers and shows it to a premium reader', async () => {
+    const alice = await registerUser('Alice', 'alice@example.com');
+    const bob = await registerUser('Bob', 'bob@example.com');
+    await markUserPremium(alice.user.id);
+
+    const created = await request(app)
+      .post('/api/posts')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ title: 'Secret', content: 'Hidden', premium: true });
+
+    const anonymous = await request(app).get(`/api/posts/${created.body.id}`);
+    const nonPremium = await request(app)
+      .get(`/api/posts/${created.body.id}`)
+      .set('Authorization', `Bearer ${bob.token}`);
+    const invalid = await request(app)
+      .get(`/api/posts/${created.body.id}`)
+      .set('Authorization', 'Bearer invalid-token');
+    const premium = await request(app)
+      .get(`/api/posts/${created.body.id}`)
+      .set('Authorization', `Bearer ${alice.token}`);
+
+    expect(anonymous.status).toBe(404);
+    expect(anonymous.body.error).toEqual({
+      code: 'NOT_FOUND',
+      message: 'Post not found',
+    });
+
+    expect(nonPremium.status).toBe(404);
+    expect(nonPremium.body.error).toEqual({
+      code: 'NOT_FOUND',
+      message: 'Post not found',
+    });
+
+    expect(invalid.status).toBe(401);
+    expect(invalid.body.error.code).toBe('UNAUTHORIZED');
+
+    expect(premium.status).toBe(200);
+    expect(premium.body.premium).toBe(true);
+    expect(premium.body.author).toEqual({ id: alice.user.id, name: 'Alice' });
+    expect(premium.body.author).not.toHaveProperty('premium');
   });
 });

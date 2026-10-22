@@ -5,6 +5,7 @@ const PAGE_LIMIT = 10;
 
 type ListPostsInput = {
     page: number;
+    includePremium: boolean;
 }
 
 export class ListPostsUseCase {
@@ -13,8 +14,10 @@ export class ListPostsUseCase {
         private readonly likesRepository: LikesRepository,
     ) { }
 
-    async execute({ page }: ListPostsInput) {
-        const { rows, total } = await this.postsRepository.listWithAuthor(page, PAGE_LIMIT);
+    async execute({ page, includePremium }: ListPostsInput) {
+        const { rows, total } = await this.postsRepository.listWithAuthor(page, PAGE_LIMIT, {
+            includePremium,
+        });
         const likesCounts = await this.likesRepository.countByPostIds(rows.map((row) => row.id));
 
         return {
