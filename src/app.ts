@@ -5,12 +5,15 @@ import { authRouter } from './routes/auth.routes.js';
 import { healthRouter } from './routes/health.routes.js';
 import { meRouter } from './routes/me.routes.js';
 import { postsRouter } from './routes/posts.routes.js';
+import { webhookRouter } from './routes/webhook.routes.js';
 import { getUploadsDir } from './storage/uploads-dir.js';
 
 export function createApp() {
   const app = express();
 
   app.use(cors());
+  // Raw body da assinatura Stripe: este router precisa vir antes do express.json().
+  app.use(webhookRouter);
   app.use(express.json());
   app.use('/uploads', express.static(getUploadsDir()));
   app.use(healthRouter);
