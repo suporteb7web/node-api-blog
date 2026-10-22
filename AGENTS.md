@@ -141,6 +141,8 @@ Prefixo da API: `/api`. Health: `GET /health` (fora de `/api`).
 |--------|------|------|
 | `POST` | `/api/auth/register` | não |
 | `POST` | `/api/auth/login` | não |
+| `POST` | `/api/me/checkout` | sim |
+| `POST` | `/api/webhook/stripe` | não |
 | `GET` | `/api/posts` | não |
 | `GET` | `/api/posts/:id` | opcional |
 | `POST` | `/api/posts` | sim |
@@ -152,6 +154,8 @@ Prefixo da API: `/api`. Health: `GET /health` (fora de `/api`).
 | `DELETE` | `/api/posts/:id/replies/:replyId` | sim |
 
 Paths de **avatar** e de foto no create/update de post ficam em `docs/api.md` — atualizar o contrato **junto** com a feature. Upload é `multipart/form-data` nessas rotas; o restante da API continua `application/json`.
+
+`POST /api/webhook/stripe` não usa Bearer. O router do webhook é montado **antes** de `express.json()`, com `express.raw` na rota, para verificar `STRIPE_WEBHOOK_SECRET` sobre o body cru. Observa `checkout.session.completed`, lê `client_reference_id` e não persiste nada. **200** se a assinatura é válida (e, nesse evento, se o id veio); **400** se a assinatura falha ou o id falta. Outros eventos assinados respondem **200** e são ignorados.
 
 - Register → **201** `{ token, user: { id, name, email } }` (já autenticado). Incluir `avatar` no user quando o campo existir no contrato.
 - Login → **200** mesmo shape; gera **novo** token (substitui o anterior na coluna).

@@ -15,9 +15,11 @@ API de blog com autenticação de usuários, gestão de posts, likes, replies, m
 - Usuário autenticado pode curtir/descurtir um post (incluindo o próprio) e responder um post.
 - Só o **autor da reply** pode apagá-la (o autor do post não apaga reply de outra pessoa).
 - Usuário autenticado consulta os próprios dados em `GET /api/me` e atualiza o **avatar** em `PUT /api/me/avatar`.
+- Usuário autenticado inicia a compra de acesso premium em `POST /api/me/checkout`: o endpoint cria uma Checkout Session de pagamento único no Stripe e devolve somente a URL. Não concede o acesso nem altera o usuário ou os posts.
+- O Stripe notifica `POST /api/webhook/stripe` no evento `checkout.session.completed`. O endpoint verifica a assinatura com `STRIPE_WEBHOOK_SECRET` e lê `client_reference_id`. Não persiste nada e não concede o acesso.
 - O autor do post atualiza a **imagem** do post em `PUT /api/posts/:id/image` (arquivo em disco, path no banco).
 - Nova reply em um post **de outra pessoa** dispara e-mail ao autor do post. Responder o próprio post **não** gera e-mail.
-- Escopo limitado a **auth + posts + likes + replies + mídia + e-mail de reply** (sem perfil completo, logout, papéis de admin, soft delete, threads, like em reply, etc.).
+- Escopo limitado a **auth + posts + likes + replies + mídia + e-mail de reply + checkout Stripe de acesso premium + webhook `checkout.session.completed`** (sem perfil completo, logout, papéis de admin, soft delete, threads, like em reply, concessão de acesso após o pagamento, etc.).
 
 ### Relacionamentos
 
@@ -198,6 +200,8 @@ Rotas de arquivo usam `multipart/form-data`. O restante da API continua `applica
 | `POST` | `/api/auth/login` | Não | Login + retorno de token |
 | `GET` | `/api/me` | Sim | Dados do usuário autenticado |
 | `PUT` | `/api/me/avatar` | Sim | Atualizar o avatar do usuário autenticado |
+| `POST` | `/api/me/checkout` | Sim | Criar Checkout Session Stripe e devolver a URL |
+| `POST` | `/api/webhook/stripe` | Não | Receber `checkout.session.completed`, verificar a assinatura e ler `client_reference_id` |
 | `GET` | `/api/posts` | Não | Listagem pública paginada |
 | `GET` | `/api/posts/:id` | Opcional | Consulta pública por id (`likedByMe` se autenticado) |
 | `POST` | `/api/posts` | Sim | Criar post |
@@ -857,6 +861,94 @@ Nenhum.
 
 ---
 
+### 5.15 `POST /api/me/checkout`
+
+Cria uma Checkout Session de pagamento único no Stripe para o usuário autenticado e devolve somente a URL hospedada. Não persiste dados e não altera o usuário nem os posts.
+
+| | |
+|--|--|
+| **Authorization** | Sim — `Bearer <token>` |
+
+#### Input
+
+Nenhum (`body`, `params` e `query` vazios).
+
+A sessão é criada com:
+
+- `mode`: `payment`
+- `line_items`: preço `STRIPE_PRICE_ID`, quantidade `1`
+- `success_url`: `STRIPE_SUCCESS_URL`
+- `cancel_url`: `STRIPE_CANCEL_URL`
+- `client_reference_id`: id do usuário autenticado, em string
+- `customer_email`: e-mail do usuário autenticado
+
+#### Respostas
+
+**200 OK**
+
+```json
+{
+  "url": "https://checkout.stripe.com/..."
+}
+```
+
+**401** — `UNAUTHORIZED` — token ausente ou inválido
+
+Falha ao criar a sessão no Stripe → **500** `INTERNAL_ERROR`.
+
+---
+
+### 5.16 `POST /api/webhook/stripe`
+
+Recebe o webhook do Stripe. Não exige token de sessão: a autenticidade é o header `Stripe-Signature`, verificado com `STRIPE_WEBHOOK_SECRET` sobre o **body cru** (os bytes originais, antes de qualquer parse JSON).
+
+Observa o evento `checkout.session.completed`. Nesse evento, lê `client_reference_id` e para por aí: não persiste, não altera o usuário e não concede acesso. Evento de outro tipo, com assinatura válida, é reconhecido e ignorado.
+
+| | |
+|--|--|
+| **Authorization** | Não |
+| **Content-Type** | `application/json` (body cru) |
+
+#### Input
+
+- Header `Stripe-Signature` (obrigatório para aceitar o evento).
+- Body: payload do evento, como o Stripe enviou.
+
+#### Respostas
+
+**200 OK** — corpo vazio.
+
+A assinatura é válida e:
+
+- o evento é `checkout.session.completed` e `client_reference_id` veio preenchido; ou
+- o evento é de outro tipo.
+
+**400** — `VALIDATION_ERROR`
+
+Assinatura ausente ou inválida:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid Stripe webhook"
+  }
+}
+```
+
+Evento `checkout.session.completed` sem `client_reference_id`:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Missing client_reference_id"
+  }
+}
+```
+
+---
+
 ## 6. Matriz de erros por endpoint
 
 | Endpoint | 400 | 401 | 403 | 404 | 409 |
@@ -865,6 +957,8 @@ Nenhum.
 | `POST /api/auth/login` | ✓ | ✓ | | | |
 | `GET /api/me` | | ✓ | | | |
 | `PUT /api/me/avatar` | ✓ | ✓ | | | |
+| `POST /api/me/checkout` | | ✓ | | | |
+| `POST /api/webhook/stripe` | ✓ | | | | |
 | `GET /api/posts` | ✓ | | | | |
 | `GET /api/posts/:id` | ✓ | ✓ | | ✓ | |
 | `POST /api/posts` | ✓ | ✓ | | | |
