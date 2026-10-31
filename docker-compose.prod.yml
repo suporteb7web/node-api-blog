@@ -1,0 +1,129 @@
+# Stack local. Imagens já buildadas: blog-api:local e blog-frontend:local.
+#
+#   docker compose -f docker-compose.prod.yml up -d db
+#   npm run db:migrate
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# O Postgres de desenvolvimento também usa a porta 6000; pare esse container antes.
+# SMTP_HOST=127.0.0.1 não sai do container da API. No host, use host.docker.internal.
+
+name: blog-prod
+
+services:
+  db:
+    image: postgres:17
+    container_name: blog-prod-db
+    restart: unless-stopped
+    ports:
+      - '6000:5432'
+    environment:
+      POSTGRES_USER: blog
+      POSTGRES_PASSWORD: blog
+      POSTGRES_DB: blog
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U blog -d blog']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    container_name: blog-prod-redis
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  uploads-init:
+    image: blog-api:local
+    pull_policy: never
+    user: root
+    restart: 'no'
+    command: ['chown', '-R', 'node:node', '/app/uploads']
+    volumes:
+      - uploads:/app/uploads
+
+  api:
+    image: blog-api:local
+    pull_policy: never
+    container_name: blog-prod-api
+    restart: unless-stopped
+    init: true
+    ports:
+      - '3000:3000'
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://blog:blog@db:5432/blog
+      REDIS_URL: redis://redis:6379
+      UPLOADS_DIR: uploads
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      uploads-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '--input-type=module',
+          '-e',
+          'import net from "node:net"; const s = net.connect(3000, "127.0.0.1", () => { s.end(); process.exit(0); }); s.on("error", () => process.exit(1));',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  frontend:
+    image: blog-frontend:local
+    pull_policy: never
+    container_name: blog-prod-frontend
+    restart: unless-stopped
+    init: true
+    ports:
+      - '3001:3000'
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      # O browser abre as fotos nessa URL; o container chega nela pela porta publicada da API.
+      BACKEND_URL: http://api.localhost:3000
+    extra_hosts:
+      - 'api.localhost:host-gateway'
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '--input-type=module',
+          '-e',
+          'import net from "node:net"; const s = net.connect(3000, "127.0.0.1", () => { s.end(); process.exit(0); }); s.on("error", () => process.exit(1));',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:
